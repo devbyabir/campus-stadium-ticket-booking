@@ -9,6 +9,7 @@ import Profile from './pages/Profile.jsx';
 import Settings from './pages/Settings.jsx';
 import AdminDashboard from './pages/AdminDashboard.jsx';
 import Help from './pages/Help.jsx';
+import Privacy from './pages/Privacy.jsx';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/help" element={<Help />} />
+        <Route path="/privacy" element={<Privacy />} />
         <Route path="*" element={<main><h1>Page not found</h1></main>} />
       </Routes>
     </BrowserRouter>

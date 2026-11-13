@@ -1,6 +1,14 @@
 import { Router } from 'express';
-import { getStats } from '../controllers/adminController.js';
+import { getStats, createInvite, createEvent, listBookings, redeemTicket, addSeats, listUnverifiedStudents, verifyStudent } from '../controllers/adminController.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 const router = Router();
 router.get('/stats', requireAuth, requireRole('admin'), (req, res, next) => Promise.resolve(getStats(req, res)).catch(next));
+const handle = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
+router.post('/invites', requireAuth, requireRole('admin'), handle(createInvite));
+router.get('/students/unverified', requireAuth, requireRole('admin'), handle(listUnverifiedStudents));
+router.put('/students/:id/verify', requireAuth, requireRole('admin'), handle(verifyStudent));
+router.post('/events', requireAuth, requireRole('admin'), handle(createEvent));
+router.get('/bookings', requireAuth, requireRole('admin'), handle(listBookings));
+router.post('/seats', requireAuth, requireRole('admin'), handle(addSeats));
+router.post('/tickets/redeem', requireAuth, requireRole('admin'), handle(redeemTicket));
 export default router;

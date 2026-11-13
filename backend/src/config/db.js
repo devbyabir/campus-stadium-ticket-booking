@@ -12,8 +12,7 @@ export const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   ssl: process.env.DATABASE_SSL === 'verify-full' ? { rejectUnauthorized: true }
-    : process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false }
-      : process.env.DATABASE_SSL === 'disable' ? false : undefined,
+    : process.env.DATABASE_SSL === 'disable' ? false : undefined,
 });
 
 pool.on('error', (error) => {

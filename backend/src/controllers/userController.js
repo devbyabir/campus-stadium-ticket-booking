@@ -12,22 +12,18 @@ export async function getProfile(req, res) {
 }
 
 export async function updateProfile(req, res) {
-  const { name, email, universityId = null, phone = null } = req.body ?? {};
+  const { name, phone = null } = req.body ?? {};
   const cleanName = typeof name === 'string' ? name.trim() : '';
-  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-  const cleanId = typeof universityId === 'string' ? universityId.trim() || null : universityId;
   const cleanPhone = typeof phone === 'string' ? phone.trim() || null : phone;
-  if (!cleanName || cleanName.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 254 ||
-      (cleanId !== null && (typeof cleanId !== 'string' || cleanId.length > 50)) ||
+  if (!cleanName || cleanName.length > 120 ||
       (cleanPhone !== null && (typeof cleanPhone !== 'string' || !/^[+\d() .-]{7,30}$/.test(cleanPhone)))) {
     return res.status(400).json({ error: 'Invalid profile details' });
   }
   try {
-    const user = await updateUserProfile(req.user.id, { name: cleanName, email: cleanEmail, universityId: cleanId, phone: cleanPhone });
+    const user = await updateUserProfile(req.user.id, { name: cleanName, phone: cleanPhone });
     if (!user) return res.status(404).json({ error: 'User not found' });
     return res.json({ user: publicUser(user) });
   } catch (error) {
-    if (error.code === '23505') return res.status(409).json({ error: 'Email or university ID is already in use' });
     throw error;
   }
 }

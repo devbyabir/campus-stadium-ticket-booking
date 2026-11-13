@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
 import { login, signup } from '../controllers/authController.js';
+import { dbRateLimit } from '../middleware/dbRateLimit.js';
 
 const router = Router();
-const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
+const authLimit = dbRateLimit('auth', 20);
 const handle = (controller) => (req, res, next) => Promise.resolve(controller(req, res)).catch(next);
 
 router.post('/signup', authLimit, handle(signup));

@@ -1,39 +1,109 @@
 # Campus Stadium Ticket Booking
 
-React/Vite frontend, Express API, and PostgreSQL. Authentication, event listing, seat selection, booking, QR tickets, profile editing, password changes, and admin summary counts are implemented. Admin management and detailed analytics still require backend APIs.
+Responsive stadium ticket booking for a campus software engineering project. Students browse events, choose seats, and show a QR ticket at the gate. Administrators issue student invitations, create events and seats, review bookings, and admit ticket holders.
 
-The frontend follows the supplied mobile mockups with a responsive desktop layout. The home, events, seat map, tickets, profile, settings, admin, login, and help views share one visual system.
+<p align="center">
+  <a href="https://campus-stadium-frontend.vercel.app"><img alt="Open Live Demo" src="https://img.shields.io/badge/OPEN_LIVE_DEMO-Visit_the_app-2176bd?style=for-the-badge&logo=vercel&logoColor=white"></a>
+  <a href="https://campus-stadium-api.vercel.app/api/ready"><img alt="Check API Status" src="https://img.shields.io/badge/API_STATUS-Check_readiness-17385d?style=for-the-badge"></a>
+</p>
 
-## Setup
+**Live app:** [campus-stadium-frontend.vercel.app](https://campus-stadium-frontend.vercel.app) · **Source:** [GitHub repository](https://github.com/devbyabir/campus-stadium-ticket-booking) · **Privacy notice:** [Data use](https://campus-stadium-frontend.vercel.app/privacy)
 
-1. Create a PostgreSQL database. Copy `backend/.env.example` to `backend/.env`; set `DATABASE_URL` and a random `JWT_SECRET` of at least 32 characters.
-2. In `backend`, run `npm ci`, `npm run migrate`, then `npm run dev`.
-3. Copy `frontend/.env.example` to `frontend/.env`. In `frontend`, run `npm ci`, then `npm run dev`.
+> **Demo status:** This public deployment contains presentation events. Registration requires an administrator-issued invite; there is no public demo account. Please do not enter real student information. Institutional approval, a verified student roster/SSO, an official privacy policy, and an operational owner are required before real campus use.
 
-The API also exposes `GET /api/user/profile`, `PUT /api/user/profile`, `PUT /api/user/change-password`, and admin-only `GET /api/admin/stats`. Active users in admin stats are distinct users with a booking created in the last 30 days. Signup accepts `name`, `email`, and `password` (at least 12 characters, at most 72 UTF-8 bytes) and creates a student account. Both auth routes return `{ "user": { ... }, "token": "..." }`. Send the token with `Authorization: Bearer <token>` for protected routes. Admin users must be provisioned by a trusted database administrator.
+## Features
 
-Seat records are scoped to events. Booking updates seats and creates QR hashes in one transaction. The schema's unique constraints prevent a seat from being attached to two bookings.
+| Student experience | Administration |
+| --- | --- |
+| Invitation-based signup and JWT login | Issue single-use student invitations |
+| Upcoming events and section A–D seat map | Create events with a full seat layout; add seats |
+| Transactional seat booking | View the latest 100 bookings and live statistics |
+| QR ticket, profile, password change | Redeem a QR ticket once at the gate |
+| Responsive mobile and desktop UI | Monthly bookings and event-category totals |
 
-## Deployment
+The QR reader accepts a keyboard-style scanner or a pasted token. Entry opens two hours before an event and closes at its end. The API rejects cancelled, invalid, and previously redeemed tickets. A QR code is a bearer credential: share it only with its ticket holder.
 
-### Vercel Hobby and Neon Free
+## Architecture
 
-Use two Vercel projects from this GitHub repository and one Neon PostgreSQL project. No Render account or credit card is needed. Free plans have usage limits; review the [Vercel Hobby plan](https://vercel.com/docs/plans/hobby) and [Neon pricing](https://neon.com/pricing).
+```text
+React + Vite + Tailwind (Vercel)
+            │ HTTPS /api
+            ▼
+Express API (Vercel Functions)
+            │ pooled PostgreSQL connection
+            ▼
+Neon PostgreSQL
+```
 
-Live frontend: https://campus-stadium-frontend.vercel.app
+`frontend/src/pages` contains the UI; `frontend/src/services/api.js` contains Axios calls. `backend/src/routes` connects endpoints to controllers, `backend/src/middleware` applies access and request limits, and `backend/migrations` owns the PostgreSQL schema. The API and UI are separate Vercel projects linked to the same GitHub repository.
 
-Live API health check: https://campus-stadium-api.vercel.app/api/health
+## Run locally
 
-The deployed database uses the Neon `free_v3` plan. The API and frontend projects are `campus-stadium-api` and `campus-stadium-frontend` in the `dev-by-abir` Vercel team. Production URLs and CORS are configured in those projects. Migration `003_demo_events.sql` adds clearly labeled demo events and seats for the project presentation; replace them with verified campus events before real ticket sales.
+Requirements: Node.js 22+, npm, PostgreSQL 16+.
 
-1. Create a Neon Free PostgreSQL project. Copy its **pooled** connection URL for the API and **direct** connection URL for migrations. Both URLs should include `sslmode=require`. Keep them secret.
-2. Run migrations once from `backend`: set `MIGRATION_DATABASE_URL` to the direct URL in your local shell, then run `npm run migrate`. The runner records applied files in `schema_migrations`.
-3. In Vercel team `dev-by-abir`, import `devbyabir/campus-stadium-ticket-booking` with **Root Directory** `backend` and **Framework Preset** Express. Set `DATABASE_URL` to the pooled Neon URL, `JWT_SECRET` to a random string of at least 32 characters, and `NODE_ENV=production`. Deploy and check `https://<backend-project>.vercel.app/api/health`.
-4. Import the same repository as a second Vercel project with **Root Directory** `frontend` and **Framework Preset** Vite. Set `VITE_API_URL=https://<backend-project>.vercel.app/api` for Production. Deploy and note its URL.
-5. Set `FRONTEND_ORIGIN=https://<frontend-project>.vercel.app` on the backend Vercel project, without a trailing slash, then redeploy it. Exact preview origins can be added as a comma-separated list.
+1. Create an empty PostgreSQL database. Copy `backend/.env.example` to `backend/.env`, set `DATABASE_URL`, and set a random `JWT_SECRET` of at least 32 characters. Keep secrets out of Git.
+2. From `backend`, run `npm ci`, `npm run migrate`, then `npm run dev`.
+3. Copy `frontend/.env.example` to `frontend/.env` and set `VITE_API_URL=http://localhost:3000/api`. From `frontend`, run `npm ci`, then `npm run dev`.
+4. Open `http://localhost:5173`. Check `http://localhost:3000/api/ready` for database readiness.
 
-Vercel environment variables belong in each project's dashboard or CLI, never in Git. `VITE_API_URL` is public in the browser bundle; the database URLs and `JWT_SECRET` belong only to the backend project. The backend exports Express from `src/app.js` for Vercel Functions; `src/local-server.js` is for local development.
+All signup invitations must come from an admin. For a **local disposable database only**, create the first admin after migrations with a bcrypt hash generated by the backend package:
 
-Both Vercel projects are connected to this GitHub repository, so pushes to `main` deploy automatically. The Vercel GitHub App has access only to this repository. For a manual CLI deployment, run `vercel link --scope dev-by-abir --project <project-name>` from the repository root, then `vercel --prod --scope dev-by-abir`; the configured Root Directory selects `backend` or `frontend`.
+```powershell
+cd backend
+node -e "import('bcryptjs').then(async ({default:b}) => console.log(await b.hash('replace-with-a-long-unique-password',12)))"
+```
 
-For a database migrated manually before `schema_migrations` existed, mark an already applied migration in that table only after verifying its schema changes are present. Do not rerun old SQL blindly.
+Insert that hash with a parameterized database client into `users(name,email,password_hash,role)` using role `admin`. Do not promote arbitrary existing users or put an admin password in a migration or Git. The administrator then signs in at `/login` and issues invitations from `/admin`.
+
+## API summary
+
+| Method | Path | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/health`, `/api/ready` | Public | Process health and database readiness |
+| `POST` | `/api/auth/login`, `/api/auth/signup` | Public | Login and invited signup |
+| `GET` | `/api/events`, `/api/events/:id/seats` | Public | Events and seat map |
+| `POST` | `/api/bookings` | Student/admin | Book 1–20 available seats atomically |
+| `GET` | `/api/user/tickets`, `/api/user/profile` | Signed in | Tickets and profile |
+| `PUT` | `/api/user/profile`, `/api/user/change-password` | Signed in | Edit name/phone, rotate password and sessions |
+| `GET` | `/api/admin/stats`, `/api/admin/bookings` | Admin | Counts, analytics, recent bookings |
+| `POST` | `/api/admin/invites`, `/api/admin/events`, `/api/admin/seats` | Admin | Student and event management |
+| `POST` | `/api/admin/tickets/redeem` | Admin | Single-use gate check-in |
+
+Send `Authorization: Bearer <token>` on protected routes. Signup requires `name`, `email`, a 12+ character `password`, and a 64-character `invitationCode` matching an admin-approved email and university ID. An invitation expires after seven days and can be used once. Name and phone may be edited; changes to verified email or University ID require an administrator. Invalid seats return `409`; a second gate scan returns `409`. See controllers for exact request and response fields.
+
+## Tests and release checks
+
+```powershell
+cd backend
+npm test                 # Unit tests; DB integration test skips without TEST_DATABASE_URL
+$env:TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/campus_test'
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
+npm run migrate          # Use a disposable database, never production
+npm test                 # Runs the full invitation → booking → check-in flow
+cd ../frontend
+npm run build
+```
+
+[GitHub Actions](https://github.com/devbyabir/campus-stadium-ticket-booking/actions) starts PostgreSQL 16, migrates it, runs backend tests, and builds the frontend on pushes and pull requests. Keep `main` protected with this check required for merges. A deployment is complete only after `/api/ready`, public events, login, booking, ticket display, and admin gate flow are verified with disposable records.
+
+## Free deployment
+
+The deployed projects are `campus-stadium-api` and `campus-stadium-frontend` in Vercel team `dev-by-abir`; the database uses Neon Free. Vercel Hobby has usage limits and is restricted to personal/non-commercial use. Review [Vercel Hobby](https://vercel.com/docs/plans/hobby) and [Neon pricing](https://neon.com/pricing) before changing the audience or traffic level.
+
+1. In Neon, use a **pooled** PostgreSQL URL for the API and a **direct** URL for migrations. Keep both private and use TLS (`sslmode=require`).
+2. **Before deploying code that needs a new schema**, back up the database and run `npm run migrate` from `backend` with `MIGRATION_DATABASE_URL` set to the direct URL. The runner serializes migrations with a PostgreSQL advisory lock and tracks filenames in `schema_migrations`. Do not edit a migration after it has run.
+3. In Vercel, import this repository twice: root directory `backend` (Express preset) and root directory `frontend` (Vite preset). Backend Production variables: `DATABASE_URL`, `JWT_SECRET`, `FRONTEND_ORIGIN=https://campus-stadium-frontend.vercel.app`, `NODE_ENV=production`. `QR_SECRET` is optional but recommended; set a stable random 32+ character value **before issuing tickets** and never rotate it without a ticket reissue plan. Frontend Production variable: `VITE_API_URL=https://campus-stadium-api.vercel.app/api`.
+4. Push to `main`; both connected Vercel projects auto-deploy. Check the [live app](https://campus-stadium-frontend.vercel.app), [readiness](https://campus-stadium-api.vercel.app/api/ready), and GitHub Actions. Never put database URLs, JWT/QR secrets, or invite codes in Git or `VITE_*` variables.
+
+### Operations and recovery
+
+- Take a Neon backup/snapshot before schema changes and test restoring it to a separate database. Confirm the backup and retention options available in your Neon plan.
+- Migrations are forward-only. If a deploy fails, restore the previous Vercel deployment; if a schema change is incompatible, write a corrective migration or restore a verified backup. Avoid destructive column changes in the same release as dependent code.
+- `GET /api/health` checks the function process. `GET /api/ready` checks PostgreSQL connectivity. Review Vercel function logs and Neon connection usage if readiness fails.
+- `backend/migrations/003_demo_events.sql` seeds sample events for presentations. Replace them with verified campus events before real bookings. Demo dates are relative to migration time, so they eventually expire.
+- Invitations are shown once to the admin; share them through a private channel. Gate operators need admin accounts. Do not publish QR tokens or screenshots containing them.
+- For support, use [GitHub Issues](https://github.com/devbyabir/campus-stadium-ticket-booking/issues) without posting personal data. Account removal is currently manual and must be handled by an authorized project administrator.
+
+## Project status
+
+This repository is suitable for a **software engineering demo**, subject to a successful final CI run and live smoke test. It is **not an institution-approved production ticket service**. Before real use, the university must own the student identity process, review the [demo privacy notice](https://campus-stadium-frontend.vercel.app/privacy), appoint support and data owners, define retention/deletion policy, and validate its hosting terms and capacity. The detailed review is in [`PROJECT_AUDIT.md`](PROJECT_AUDIT.md).

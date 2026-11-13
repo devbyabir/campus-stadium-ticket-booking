@@ -60,3 +60,38 @@ export async function fetchAdminStats() {
   const { data } = await api.get('/admin/stats');
   return data.stats;
 }
+
+export async function createAdminInvite(details) {
+  const { data } = await api.post('/admin/invites', details);
+  return data.invite;
+}
+
+export async function createAdminEvent(details) {
+  const { data } = await api.post('/admin/events', details);
+  return data;
+}
+
+export async function fetchAdminBookings() {
+  const { data } = await api.get('/admin/bookings');
+  return data.bookings;
+}
+
+export async function addAdminSeats(details) {
+  const { data } = await api.post('/admin/seats', details);
+  return data;
+}
+
+export async function redeemAdminTicket(token) {
+  const { data } = await api.post('/admin/tickets/redeem', { token });
+  return data.ticket;
+}
+
+export async function fetchUnverifiedStudents() {
+  const { data } = await api.get('/admin/students/unverified');
+  return data.students;
+}
+
+export async function verifyAdminStudent(id, universityId) {
+  const { data } = await api.put(`/admin/students/${encodeURIComponent(id)}/verify`, { universityId });
+  return data.student;
+}

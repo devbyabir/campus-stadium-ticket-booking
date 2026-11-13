@@ -1,5 +1,7 @@
 # Complete source code
 
+Generated from the files in this repository. Use the actual files for editing; this is a review snapshot.
+
 ## backend/.env.example
 
 ```text
@@ -8,10 +10,13 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5432/campus_stadium
 # Neon API: use the pooled connection URL ending in ?sslmode=require.
 # For migrations, set MIGRATION_DATABASE_URL to Neon's direct URL ending in ?sslmode=require.
 JWT_SECRET=replace-with-a-random-secret-at-least-32-characters-long
+# Optional stable separate secret for ticket QR signatures. Set before issuing tickets.
+# QR_SECRET=replace-with-another-random-secret-at-least-32-characters-long
 JWT_EXPIRES_IN=1h
 FRONTEND_ORIGIN=http://localhost:5173
 # Production: https://your-frontend-project.vercel.app
 NODE_ENV=development
+
 ```
 
 ## backend/migrations/001_initial.sql
@@ -81,6 +86,8 @@ CREATE TABLE booking_seats (
     UNIQUE (seat_id)
 );
 CREATE INDEX booking_seats_booking_idx ON booking_seats (booking_id);
+
+
 ```
 
 ## backend/migrations/002_profile.sql
@@ -88,6 +95,7 @@ CREATE INDEX booking_seats_booking_idx ON booking_seats (booking_id);
 ```sql
 ALTER TABLE users ADD COLUMN university_id VARCHAR(50), ADD COLUMN phone VARCHAR(30);
 CREATE UNIQUE INDEX users_university_id_unique ON users (university_id) WHERE university_id IS NOT NULL;
+
 ```
 
 ## backend/migrations/003_demo_events.sql
@@ -109,6 +117,58 @@ FROM demo_events AS event
 CROSS JOIN stadium_sections AS section
 CROSS JOIN generate_series(1, 4) AS row_numbers(value)
 CROSS JOIN generate_series(1, 8) AS seat_numbers(value);
+
+```
+
+## backend/migrations/004_admission_and_admin.sql
+
+```sql
+CREATE TABLE student_invites (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    email VARCHAR(254) NOT NULL,
+    university_id VARCHAR(50) NOT NULL,
+    code_hash CHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX student_invites_open_email ON student_invites (lower(email)) WHERE used_at IS NULL;
+CREATE UNIQUE INDEX student_invites_open_university_id ON student_invites (university_id) WHERE used_at IS NULL;
+
+ALTER TABLE booking_seats ADD COLUMN redeemed_at TIMESTAMPTZ;
+ALTER TABLE booking_seats ADD COLUMN qr_version INTEGER NOT NULL DEFAULT 1 CHECK (qr_version > 0);
+
+ALTER TABLE events ADD COLUMN category VARCHAR(20) NOT NULL DEFAULT 'other'
+    CHECK (category IN ('sports', 'music', 'arts', 'academic', 'other'));
+UPDATE events SET category = CASE
+    WHEN lower(title) ~ 'sport|football|basketball' THEN 'sports'
+    WHEN lower(title) ~ 'music|concert' THEN 'music'
+    WHEN lower(title) ~ 'theatre|art' THEN 'arts'
+    WHEN lower(title) ~ 'convocation|graduation' THEN 'academic'
+    ELSE 'other' END;
+
+```
+
+## backend/migrations/005_session_and_rate_limits.sql
+
+```sql
+ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE api_rate_limits (
+    scope VARCHAR(40) NOT NULL,
+    key_hash CHAR(64) NOT NULL,
+    window_ends_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (scope, key_hash)
+);
+
+```
+
+## backend/migrations/006_student_verification.sql
+
+```sql
+ALTER TABLE users ADD COLUMN verified_at TIMESTAMPTZ;
+
 ```
 
 ## backend/package.json
@@ -130,12 +190,12 @@ CROSS JOIN generate_series(1, 8) AS seat_numbers(value);
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.13.1"
   }
 }
+
 ```
 
 ## backend/src/app.js
@@ -150,18 +210,24 @@ import eventRoutes from './routes/eventRoutes.js';
 import { bookingRoutes, userRoutes } from './routes/bookingRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
+import { pool } from './config/db.js';
 
 export const app = express();
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   throw new Error('JWT_SECRET must be at least 32 characters');
 }
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(helmet());
 const allowedOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
   .split(',').map(origin => origin.trim()).filter(Boolean);
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '10kb' }));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/api/ready', async (_req, res) => {
+  try { await pool.query('SELECT 1'); res.json({ status: 'ready' }); }
+  catch { res.status(503).json({ status: 'database_unavailable' }); }
+});
 app.use('/api/auth', authRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/bookings', bookingRoutes);
@@ -171,6 +237,7 @@ app.use(notFound);
 app.use(errorHandler);
 
 export default app;
+
 ```
 
 ## backend/src/config/db.js
@@ -190,19 +257,39 @@ export const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   ssl: process.env.DATABASE_SSL === 'verify-full' ? { rejectUnauthorized: true }
-    : process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false }
-      : process.env.DATABASE_SSL === 'disable' ? false : undefined,
+    : process.env.DATABASE_SSL === 'disable' ? false : undefined,
 });
 
 pool.on('error', (error) => {
   console.error('Unexpected PostgreSQL pool error', error);
 });
+
+```
+
+## backend/src/config/ticketToken.js
+
+```js
+import { createHash, createHmac } from 'node:crypto';
+
+export function tokenForTicket(id, version = 1) {
+  const message = `${id}.${version}`;
+  const signature = createHmac('sha256', process.env.QR_SECRET || process.env.JWT_SECRET)
+    .update(`campus-ticket:${message}`).digest('hex');
+  return `${message}.${signature}`;
+}
+
+export function hashTicketToken(token) {
+  return createHash('sha256').update(token).digest('hex');
+}
+
 ```
 
 ## backend/src/controllers/adminController.js
 
 ```js
 import { pool } from '../config/db.js';
+import { createHash, randomBytes } from 'node:crypto';
+import { hashTicketToken, tokenForTicket } from '../config/ticketToken.js';
 
 export async function getStats(_req, res) {
   const { rows } = await pool.query(`
@@ -211,8 +298,95 @@ export async function getStats(_req, res) {
       (SELECT count(*)::int FROM bookings) AS total_bookings,
       (SELECT count(DISTINCT user_id)::int FROM bookings WHERE created_at >= now() - interval '30 days') AS active_users
   `);
-  return res.json({ stats: { totalEvents: rows[0].total_events, totalBookings: rows[0].total_bookings, activeUsers: rows[0].active_users } });
+  const monthly = await pool.query("SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, count(*)::int AS total FROM bookings WHERE created_at >= date_trunc('month', now()) - interval '5 months' GROUP BY 1 ORDER BY 1");
+  const categories = await pool.query('SELECT e.category, count(*)::int AS total FROM bookings b JOIN events e ON e.id = b.event_id GROUP BY e.category ORDER BY total DESC, e.category');
+  return res.json({ stats: { totalEvents: rows[0].total_events, totalBookings: rows[0].total_bookings, activeUsers: rows[0].active_users, monthlyBookings: monthly.rows, topCategories: categories.rows } });
 }
+
+export async function createInvite(req, res) {
+  const { email, universityId } = req.body ?? {};
+  if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+      typeof universityId !== 'string' || !universityId.trim() || universityId.length > 50) {
+    return res.status(400).json({ error: 'Valid email and university ID are required' });
+  }
+  const code = randomBytes(32).toString('hex');
+  try {
+    await pool.query('DELETE FROM student_invites WHERE used_at IS NULL AND expires_at <= now()');
+    const { rows } = await pool.query("INSERT INTO student_invites (email, university_id, code_hash, expires_at, created_by) VALUES ($1, $2, $3, now() + interval '7 days', $4) RETURNING id, email, university_id, expires_at", [email.trim().toLowerCase(), universityId.trim(), createHash('sha256').update(code).digest('hex'), req.user.id]);
+    return res.status(201).json({ invite: { ...rows[0], code } });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'An unclaimed invite already exists for this email or university ID' });
+    throw error;
+  }
+}
+
+export async function listUnverifiedStudents(_req, res) {
+  const { rows } = await pool.query("SELECT id, name, email, university_id, created_at FROM users WHERE role = 'student' AND verified_at IS NULL ORDER BY created_at LIMIT 100");
+  return res.json({ students: rows });
+}
+
+export async function verifyStudent(req, res) {
+  if (!/^[1-9]\d*$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid student ID' });
+  const { universityId } = req.body ?? {};
+  if (typeof universityId !== 'string' || !universityId.trim() || universityId.length > 50) return res.status(400).json({ error: 'Verified university ID is required' });
+  try {
+    const { rows } = await pool.query("UPDATE users SET university_id = $2, verified_at = now() WHERE id = $1 AND role = 'student' AND verified_at IS NULL RETURNING id, name, university_id", [req.params.id, universityId.trim()]);
+    if (!rows.length) return res.status(409).json({ error: 'Student was already approved or does not exist' });
+    return res.json({ student: rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'University ID is already assigned to another student' });
+    throw error;
+  }
+}
+
+export async function createEvent(req, res) {
+  const { title, description = '', startsAt, endsAt, venue, category = 'other', rowsPerSection, seatsPerRow } = req.body ?? {};
+  const start = new Date(startsAt); const end = new Date(endsAt);
+  if (typeof title !== 'string' || !title.trim() || title.length > 200 || typeof venue !== 'string' || !venue.trim() || venue.length > 200 ||
+      typeof description !== 'string' || description.length > 2000 || !Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) ||
+      start <= new Date() || end <= start || !['sports', 'music', 'arts', 'academic', 'other'].includes(category) ||
+      !Number.isInteger(rowsPerSection) || rowsPerSection < 1 || rowsPerSection > 50 || !Number.isInteger(seatsPerRow) || seatsPerRow < 1 || seatsPerRow > 100) {
+    return res.status(400).json({ error: 'Valid event details and a layout of 1–50 rows and 1–100 seats per row are required' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query('INSERT INTO events (title, description, starts_at, ends_at, venue, category, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, title, starts_at, ends_at, venue, category', [title.trim(), description.trim(), start, end, venue.trim(), category, req.user.id]);
+    await client.query('INSERT INTO seats (event_id, section_id, row_number, seat_number) SELECT $1, ss.id, row_numbers.value, seat_numbers.value FROM stadium_sections ss CROSS JOIN generate_series(1, $2::int) AS row_numbers(value) CROSS JOIN generate_series(1, $3::int) AS seat_numbers(value)', [rows[0].id, rowsPerSection, seatsPerRow]);
+    await client.query('COMMIT');
+    return res.status(201).json({ event: rows[0], seatCount: 4 * rowsPerSection * seatsPerRow });
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
+}
+
+export async function listBookings(_req, res) {
+  const { rows } = await pool.query('SELECT b.id, b.status, b.created_at, u.name AS student_name, u.email, u.university_id, e.title AS event_title, e.starts_at, count(bs.id)::int AS seat_count FROM bookings b JOIN users u ON u.id = b.user_id JOIN events e ON e.id = b.event_id JOIN booking_seats bs ON bs.booking_id = b.id GROUP BY b.id, u.id, e.id ORDER BY b.created_at DESC LIMIT 100');
+  return res.json({ bookings: rows });
+}
+
+export async function addSeats(req, res) {
+  const { eventId, section, rowNumber, fromSeat, toSeat } = req.body ?? {};
+  if (!/^[1-9]\d*$/.test(String(eventId)) || !['A', 'B', 'C', 'D'].includes(section) ||
+      !Number.isInteger(rowNumber) || rowNumber < 1 || rowNumber > 100 ||
+      !Number.isInteger(fromSeat) || !Number.isInteger(toSeat) || fromSeat < 1 || toSeat < fromSeat || toSeat > 200 || toSeat - fromSeat > 99) {
+    return res.status(400).json({ error: 'Valid event, section, row, and seat range are required' });
+  }
+  const event = await pool.query('SELECT id FROM events WHERE id = $1 AND starts_at > now()', [eventId]);
+  if (!event.rowCount) return res.status(404).json({ error: 'Upcoming event not found' });
+  const result = await pool.query('INSERT INTO seats (event_id, section_id, row_number, seat_number) SELECT $1, ss.id, $3, seat_numbers.value FROM stadium_sections ss CROSS JOIN generate_series($4::int, $5::int) AS seat_numbers(value) WHERE ss.code = $2 ON CONFLICT (event_id, section_id, row_number, seat_number) DO NOTHING', [eventId, section, rowNumber, fromSeat, toSeat]);
+  return res.status(201).json({ seatsAdded: result.rowCount });
+}
+
+export async function redeemTicket(req, res) {
+  const { token } = req.body ?? {};
+  if (typeof token !== 'string' || !/^\d+\.\d+\.[0-9a-f]{64}$/.test(token)) return res.status(400).json({ error: 'Invalid QR token' });
+  const [id, version] = token.split('.');
+  if (token !== tokenForTicket(id, Number(version))) return res.status(403).json({ error: 'Invalid QR token' });
+  const { rows } = await pool.query("UPDATE booking_seats bs SET redeemed_at = now() FROM bookings b, events e WHERE bs.id = $1 AND bs.qr_version = $2 AND bs.qr_code_hash = $3 AND bs.redeemed_at IS NULL AND b.id = bs.booking_id AND b.status = 'confirmed' AND e.id = bs.event_id AND e.starts_at <= now() + interval '2 hours' AND e.ends_at > now() RETURNING bs.id AS ticket_id, bs.redeemed_at, b.id AS booking_id, e.title AS event_title", [id, version, hashTicketToken(token)]);
+  if (!rows.length) return res.status(409).json({ error: 'Ticket is invalid, already used, cancelled, or outside its entry window' });
+  return res.json({ ticket: rows[0] });
+}
+
 ```
 
 ## backend/src/controllers/authController.js
@@ -220,12 +394,14 @@ export async function getStats(_req, res) {
 ```js
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { createUser, findUserByEmail } from '../models/userModel.js';
+import { createHash } from 'node:crypto';
+import { pool } from '../config/db.js';
+import { findUserByEmail } from '../models/userModel.js';
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function tokenFor(user) {
-  return jwt.sign({ role: user.role }, process.env.JWT_SECRET, {
+  return jwt.sign({ role: user.role, version: user.token_version ?? 0 }, process.env.JWT_SECRET, {
     subject: String(user.id),
     expiresIn: process.env.JWT_EXPIRES_IN || '1h',
     algorithm: 'HS256',
@@ -237,24 +413,34 @@ function publicUser(user) {
 }
 
 export async function signup(req, res) {
-  const { name, email, password } = req.body ?? {};
+  const { name, email, password, invitationCode } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim() || name.trim().length > 120 ||
       typeof email !== 'string' || email.length > 254 || !emailPattern.test(email) ||
-      typeof password !== 'string' || password.length < 12 || Buffer.byteLength(password, 'utf8') > 72) {
-    return res.status(400).json({ error: 'Valid name, email, and password (at least 12 characters, at most 72 UTF-8 bytes) are required' });
+      typeof password !== 'string' || password.length < 12 || Buffer.byteLength(password, 'utf8') > 72 ||
+      typeof invitationCode !== 'string' || !/^[0-9a-f]{64}$/.test(invitationCode)) {
+    return res.status(400).json({ error: 'Valid name, email, password, and invitation code are required' });
   }
 
   const normalizedEmail = email.trim().toLowerCase();
+  const codeHash = createHash('sha256').update(invitationCode).digest('hex');
+  const client = await pool.connect();
   try {
     const passwordHash = await bcrypt.hash(password, 12);
-    const user = await createUser({ name: name.trim(), email: normalizedEmail, passwordHash });
+    await client.query('BEGIN');
+    const invite = await client.query('SELECT id, university_id FROM student_invites WHERE lower(email) = $1 AND code_hash = $2 AND used_at IS NULL AND expires_at > now() FOR UPDATE', [normalizedEmail, codeHash]);
+    if (!invite.rowCount) { await client.query('ROLLBACK'); return res.status(403).json({ error: 'Invitation is invalid or expired' }); }
+    const { rows } = await client.query('INSERT INTO users (name, email, university_id, password_hash, verified_at) VALUES ($1, $2, $3, $4, now()) RETURNING id, name, email, university_id, phone, role, token_version', [name.trim(), normalizedEmail, invite.rows[0].university_id, passwordHash]);
+    await client.query('UPDATE student_invites SET used_at = now() WHERE id = $1', [invite.rows[0].id]);
+    await client.query('COMMIT');
+    const user = rows[0];
     return res.status(201).json({ user: publicUser(user), token: tokenFor(user) });
   } catch (error) {
+    await client.query('ROLLBACK');
     if (error.code === '23505') {
-      return res.status(409).json({ error: 'Email is already registered' });
+      return res.status(409).json({ error: 'Email or university ID is already registered' });
     }
     throw error;
-  }
+  } finally { client.release(); }
 }
 
 export async function login(req, res) {
@@ -270,13 +456,15 @@ export async function login(req, res) {
   }
   return res.json({ user: publicUser(user), token: tokenFor(user) });
 }
+
 ```
 
 ## backend/src/controllers/bookingController.js
 
 ```js
-import { createHash, randomBytes } from 'node:crypto';
 import { pool } from '../config/db.js';
+import { hashTicketToken, tokenForTicket } from '../config/ticketToken.js';
+import { randomBytes } from 'node:crypto';
 
 export async function createBooking(req, res) {
   const { eventId, seatIds } = req.body ?? {};
@@ -293,10 +481,10 @@ export async function createBooking(req, res) {
     const booking = await client.query('INSERT INTO bookings (user_id, event_id) VALUES ($1, $2) RETURNING id, user_id, event_id, status, created_at', [req.user.id, eventId]);
     const tickets = [];
     for (const seatId of seatIds) {
-      const qrCode = randomBytes(32).toString('hex');
-      const qrHash = createHash('sha256').update(qrCode).digest('hex');
-      const row = await client.query('INSERT INTO booking_seats (booking_id, event_id, seat_id, qr_code_hash) VALUES ($1, $2, $3, $4) RETURNING id, seat_id', [booking.rows[0].id, eventId, seatId, qrHash]);
-      tickets.push({ ...row.rows[0], qrCode: qrHash });
+      const row = await client.query('INSERT INTO booking_seats (booking_id, event_id, seat_id, qr_code_hash) VALUES ($1, $2, $3, $4) RETURNING id, seat_id', [booking.rows[0].id, eventId, seatId, randomBytes(32).toString('hex')]);
+      const qrCode = tokenForTicket(row.rows[0].id);
+      await client.query('UPDATE booking_seats SET qr_code_hash = $2 WHERE id = $1', [row.rows[0].id, hashTicketToken(qrCode)]);
+      tickets.push({ ...row.rows[0], qrCode });
     }
     await client.query('COMMIT');
     res.status(201).json({ booking: booking.rows[0], tickets });
@@ -307,9 +495,16 @@ export async function createBooking(req, res) {
 }
 
 export async function userTickets(req, res) {
-  const { rows } = await pool.query('SELECT b.id AS booking_id, b.status AS booking_status, e.id AS event_id, e.title, e.starts_at, e.venue, ss.code AS section, s.row_number, s.seat_number, bs.id AS ticket_id, bs.qr_code_hash FROM bookings b JOIN events e ON e.id = b.event_id JOIN booking_seats bs ON bs.booking_id = b.id JOIN seats s ON s.id = bs.seat_id JOIN stadium_sections ss ON ss.id = s.section_id WHERE b.user_id = $1 ORDER BY e.starts_at, b.id, bs.id', [req.user.id]);
-  res.json({ tickets: rows });
+  const { rows } = await pool.query('SELECT b.id AS booking_id, b.status AS booking_status, e.id AS event_id, e.title, e.starts_at, e.venue, ss.code AS section, s.row_number, s.seat_number, bs.id AS ticket_id, bs.qr_version, bs.qr_code_hash, bs.redeemed_at FROM bookings b JOIN events e ON e.id = b.event_id JOIN booking_seats bs ON bs.booking_id = b.id JOIN seats s ON s.id = bs.seat_id JOIN stadium_sections ss ON ss.id = s.section_id WHERE b.user_id = $1 ORDER BY e.starts_at, b.id, bs.id', [req.user.id]);
+  const tickets = await Promise.all(rows.map(async ({ qr_version, qr_code_hash, ...ticket }) => {
+    const qrCode = tokenForTicket(ticket.ticket_id, qr_version);
+    const hash = hashTicketToken(qrCode);
+    if (qr_code_hash !== hash) await pool.query('UPDATE booking_seats SET qr_code_hash = $2 WHERE id = $1 AND qr_code_hash = $3', [ticket.ticket_id, hash, qr_code_hash]);
+    return { ...ticket, qrCode };
+  }));
+  res.json({ tickets });
 }
+
 ```
 
 ## backend/src/controllers/eventController.js
@@ -329,6 +524,7 @@ export async function eventSeats(req, res) {
   const { rows } = await pool.query('SELECT s.id, s.section_id, ss.code AS section, ss.name AS section_name, s.row_number, s.seat_number, s.status FROM seats s JOIN stadium_sections ss ON ss.id = s.section_id WHERE s.event_id = $1 ORDER BY ss.code, s.row_number, s.seat_number', [req.params.id]);
   res.json({ event: event.rows[0], seats: rows });
 }
+
 ```
 
 ## backend/src/controllers/userController.js
@@ -348,22 +544,18 @@ export async function getProfile(req, res) {
 }
 
 export async function updateProfile(req, res) {
-  const { name, email, universityId = null, phone = null } = req.body ?? {};
+  const { name, phone = null } = req.body ?? {};
   const cleanName = typeof name === 'string' ? name.trim() : '';
-  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-  const cleanId = typeof universityId === 'string' ? universityId.trim() || null : universityId;
   const cleanPhone = typeof phone === 'string' ? phone.trim() || null : phone;
-  if (!cleanName || cleanName.length > 120 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 254 ||
-      (cleanId !== null && (typeof cleanId !== 'string' || cleanId.length > 50)) ||
+  if (!cleanName || cleanName.length > 120 ||
       (cleanPhone !== null && (typeof cleanPhone !== 'string' || !/^[+\d() .-]{7,30}$/.test(cleanPhone)))) {
     return res.status(400).json({ error: 'Invalid profile details' });
   }
   try {
-    const user = await updateUserProfile(req.user.id, { name: cleanName, email: cleanEmail, universityId: cleanId, phone: cleanPhone });
+    const user = await updateUserProfile(req.user.id, { name: cleanName, phone: cleanPhone });
     if (!user) return res.status(404).json({ error: 'User not found' });
     return res.json({ user: publicUser(user) });
   } catch (error) {
-    if (error.code === '23505') return res.status(409).json({ error: 'Email or university ID is already in use' });
     throw error;
   }
 }
@@ -382,6 +574,7 @@ export async function changePassword(req, res) {
   if (!changed) return res.status(409).json({ error: 'Password changed elsewhere; try again' });
   return res.json({ message: 'Password changed successfully' });
 }
+
 ```
 
 ## backend/src/local-server.js
@@ -412,25 +605,35 @@ try {
   await pool.end();
   process.exitCode = 1;
 }
+
 ```
 
 ## backend/src/middleware/auth.js
 
 ```js
 import jwt from 'jsonwebtoken';
+import { pool } from '../config/db.js';
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const [scheme, token] = (req.headers.authorization ?? '').split(' ');
   if (scheme !== 'Bearer' || !token) {
     return res.status(401).json({ error: 'Authentication required' });
   }
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    req.user = { id: payload.sub, role: payload.role };
+    const { rows } = await pool.query('SELECT role, token_version, verified_at FROM users WHERE id = $1', [payload.sub]);
+    if (!rows.length || rows[0].token_version !== (payload.version ?? 0)) return res.status(401).json({ error: 'Session expired. Please log in again.' });
+    req.user = { id: payload.sub, role: rows[0].role, verified: Boolean(rows[0].verified_at) };
     return next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') return res.status(401).json({ error: 'Invalid or expired token' });
+    return next(error);
   }
+}
+
+export function requireVerifiedStudent(req, res, next) {
+  if (req.user.role === 'admin' || req.user.verified) return next();
+  return res.status(403).json({ error: 'Student identity must be verified by an administrator before booking' });
 }
 
 export function requireRole(...roles) {
@@ -440,6 +643,35 @@ export function requireRole(...roles) {
     return next();
   };
 }
+
+```
+
+## backend/src/middleware/dbRateLimit.js
+
+```js
+import { createHash } from 'node:crypto';
+import { pool } from '../config/db.js';
+
+export function dbRateLimit(scope, limit, windowMinutes = 15) {
+  return async (req, res, next) => {
+    try {
+      const key = createHash('sha256').update(req.ip || 'unknown').digest('hex');
+      const { rows } = await pool.query(`
+        INSERT INTO api_rate_limits (scope, key_hash, window_ends_at, attempts)
+        VALUES ($1, $2, now() + ($3::int * interval '1 minute'), 1)
+        ON CONFLICT (scope, key_hash) DO UPDATE SET
+          attempts = CASE WHEN api_rate_limits.window_ends_at <= now() THEN 1 ELSE api_rate_limits.attempts + 1 END,
+          window_ends_at = CASE WHEN api_rate_limits.window_ends_at <= now() THEN now() + ($3::int * interval '1 minute') ELSE api_rate_limits.window_ends_at END
+        RETURNING attempts, window_ends_at`, [scope, key, windowMinutes]);
+      if (rows[0].attempts > limit) {
+        res.set('Retry-After', String(Math.max(1, Math.ceil((new Date(rows[0].window_ends_at) - Date.now()) / 1000))));
+        return res.status(429).json({ error: 'Too many requests. Try again later.' });
+      }
+      return next();
+    } catch (error) { return next(error); }
+  };
+}
+
 ```
 
 ## backend/src/middleware/errorHandler.js
@@ -459,6 +691,7 @@ export function errorHandler(error, _req, res, _next) {
   console.error(error);
   return res.status(500).json({ error: 'Internal server error' });
 }
+
 ```
 
 ## backend/src/migrate.js
@@ -506,6 +739,7 @@ try {
   client.release();
   await pool.end();
 }
+
 ```
 
 ## backend/src/models/userModel.js
@@ -517,7 +751,7 @@ const publicColumns = 'id, name, email, university_id, phone, role, created_at';
 
 export async function findUserByEmail(email) {
   const { rows } = await pool.query(
-    'SELECT id, name, email, university_id, phone, password_hash, role, created_at FROM users WHERE lower(email) = lower($1)',
+    'SELECT id, name, email, university_id, phone, password_hash, role, token_version, created_at FROM users WHERE lower(email) = lower($1)',
     [email],
   );
   return rows[0] ?? null;
@@ -528,16 +762,16 @@ export async function findUserById(id) {
   return rows[0] ?? null;
 }
 
-export async function updateUserProfile(id, { name, email, universityId, phone }) {
+export async function updateUserProfile(id, { name, phone }) {
   const { rows } = await pool.query(
-    `UPDATE users SET name = $2, email = $3, university_id = $4, phone = $5 WHERE id = $1 RETURNING ${publicColumns}`,
-    [id, name, email, universityId, phone],
+    `UPDATE users SET name = $2, phone = $3 WHERE id = $1 RETURNING ${publicColumns}`,
+    [id, name, phone],
   );
   return rows[0] ?? null;
 }
 
 export async function updatePassword(id, oldHash, newHash) {
-  const result = await pool.query('UPDATE users SET password_hash = $3 WHERE id = $1 AND password_hash = $2', [id, oldHash, newHash]);
+  const result = await pool.query('UPDATE users SET password_hash = $3, token_version = token_version + 1 WHERE id = $1 AND password_hash = $2', [id, oldHash, newHash]);
   return result.rowCount === 1;
 }
 
@@ -548,34 +782,45 @@ export async function createUser({ name, email, passwordHash }) {
   );
   return rows[0];
 }
+
 ```
 
 ## backend/src/routes/adminRoutes.js
 
 ```js
 import { Router } from 'express';
-import { getStats } from '../controllers/adminController.js';
+import { getStats, createInvite, createEvent, listBookings, redeemTicket, addSeats, listUnverifiedStudents, verifyStudent } from '../controllers/adminController.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 const router = Router();
 router.get('/stats', requireAuth, requireRole('admin'), (req, res, next) => Promise.resolve(getStats(req, res)).catch(next));
+const handle = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
+router.post('/invites', requireAuth, requireRole('admin'), handle(createInvite));
+router.get('/students/unverified', requireAuth, requireRole('admin'), handle(listUnverifiedStudents));
+router.put('/students/:id/verify', requireAuth, requireRole('admin'), handle(verifyStudent));
+router.post('/events', requireAuth, requireRole('admin'), handle(createEvent));
+router.get('/bookings', requireAuth, requireRole('admin'), handle(listBookings));
+router.post('/seats', requireAuth, requireRole('admin'), handle(addSeats));
+router.post('/tickets/redeem', requireAuth, requireRole('admin'), handle(redeemTicket));
 export default router;
+
 ```
 
 ## backend/src/routes/authRoutes.js
 
 ```js
 import { Router } from 'express';
-import rateLimit from 'express-rate-limit';
 import { login, signup } from '../controllers/authController.js';
+import { dbRateLimit } from '../middleware/dbRateLimit.js';
 
 const router = Router();
-const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
+const authLimit = dbRateLimit('auth', 20);
 const handle = (controller) => (req, res, next) => Promise.resolve(controller(req, res)).catch(next);
 
 router.post('/signup', authLimit, handle(signup));
 router.post('/login', authLimit, handle(login));
 
 export default router;
+
 ```
 
 ## backend/src/routes/bookingRoutes.js
@@ -583,17 +828,18 @@ export default router;
 ```js
 import { Router } from 'express';
 import { createBooking, userTickets } from '../controllers/bookingController.js';
-import { requireAuth } from '../middleware/auth.js';
-import rateLimit from 'express-rate-limit';
+import { requireAuth, requireVerifiedStudent } from '../middleware/auth.js';
+import { dbRateLimit } from '../middleware/dbRateLimit.js';
 import { getProfile, updateProfile, changePassword } from '../controllers/userController.js';
 export const bookingRoutes = Router();
 export const userRoutes = Router();
 const handle = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
-bookingRoutes.post('/', requireAuth, handle(createBooking));
+bookingRoutes.post('/', requireAuth, requireVerifiedStudent, handle(createBooking));
 userRoutes.get('/tickets', requireAuth, handle(userTickets));
 userRoutes.get('/profile', requireAuth, handle(getProfile));
 userRoutes.put('/profile', requireAuth, handle(updateProfile));
-userRoutes.put('/change-password', requireAuth, rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false }), handle(changePassword));
+userRoutes.put('/change-password', requireAuth, dbRateLimit('password', 10), handle(changePassword));
+
 ```
 
 ## backend/src/routes/eventRoutes.js
@@ -606,6 +852,90 @@ const handle = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(nex
 router.get('/', handle(listEvents));
 router.get('/:id/seats', handle(eventSeats));
 export default router;
+
+```
+
+## backend/test/booking.integration.test.js
+
+```js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+
+test('invite, booking concurrency, ticket ownership, and single-use gate entry', { skip: !process.env.TEST_DATABASE_URL }, async () => {
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+  process.env.JWT_SECRET = 'test-only-secret-with-at-least-thirty-two-characters';
+  process.env.FRONTEND_ORIGIN = 'http://localhost:5173';
+  const { app } = await import('../src/app.js');
+  const { pool } = await import('../src/config/db.js');
+  const jwt = (await import('jsonwebtoken')).default;
+  const server = app.listen(0);
+  const base = `http://127.0.0.1:${server.address().port}/api`;
+  const marker = randomUUID();
+  async function request(path, method = 'GET', body, token) {
+    const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    return { status: response.status, data: await response.json() };
+  }
+  try {
+    const admin = await pool.query("INSERT INTO users (name, email, password_hash, role) VALUES ('Test Admin', $1, 'test', 'admin') RETURNING id", [`admin-${marker}@example.test`]);
+    const adminToken = jwt.sign({ role: 'admin' }, process.env.JWT_SECRET, { subject: String(admin.rows[0].id), expiresIn: '1h' });
+    const email = `student-${marker}@example.test`;
+    const invitation = await request('/admin/invites', 'POST', { email, universityId: marker }, adminToken);
+    assert.equal(invitation.status, 201);
+    const signup = await request('/auth/signup', 'POST', { name: 'Test Student', email, password: 'correct horse battery staple', invitationCode: invitation.data.invite.code });
+    assert.equal(signup.status, 201);
+    assert.equal((await request('/auth/signup', 'POST', { name: 'Other', email: `other-${marker}@example.test`, password: 'correct horse battery staple' })).status, 400);
+    assert.equal((await request('/admin/stats')).status, 401);
+    assert.equal((await request('/admin/stats', 'GET', undefined, signup.data.token)).status, 403);
+    const start = new Date(Date.now() + 30 * 60_000);
+    const end = new Date(Date.now() + 3 * 60 * 60_000);
+    const created = await request('/admin/events', 'POST', { title: `Test Event ${marker}`, venue: 'Test stadium', startsAt: start.toISOString(), endsAt: end.toISOString(), category: 'sports', rowsPerSection: 1, seatsPerRow: 1 }, adminToken);
+    assert.equal(created.status, 201);
+    const eventId = created.data.event.id;
+    const seatMap = await request(`/events/${eventId}/seats`);
+    assert.equal(seatMap.data.seats.length, 4);
+    const seatId = seatMap.data.seats[0].id;
+    const attempts = await Promise.all([request('/bookings', 'POST', { eventId, seatIds: [seatId] }, signup.data.token), request('/bookings', 'POST', { eventId, seatIds: [seatId] }, signup.data.token)]);
+    assert.deepEqual(attempts.map(item => item.status).sort(), [201, 409]);
+    const tickets = await request('/user/tickets', 'GET', undefined, signup.data.token);
+    assert.equal(tickets.data.tickets.length, 1);
+    const token = tickets.data.tickets[0].qrCode;
+    assert.match(token, /^\d+\.1\.[0-9a-f]{64}$/);
+    assert.equal((await request('/admin/tickets/redeem', 'POST', { token }, signup.data.token)).status, 403);
+    assert.equal((await request('/admin/tickets/redeem', 'POST', { token }, adminToken)).status, 200);
+    assert.equal((await request('/admin/tickets/redeem', 'POST', { token }, adminToken)).status, 409);
+    const after = await request('/user/tickets', 'GET', undefined, signup.data.token);
+    assert.ok(after.data.tickets[0].redeemed_at);
+  } finally {
+    await pool.query('DELETE FROM booking_seats WHERE event_id IN (SELECT id FROM events WHERE title = $1)', [`Test Event ${marker}`]);
+    await pool.query('DELETE FROM bookings WHERE event_id IN (SELECT id FROM events WHERE title = $1)', [`Test Event ${marker}`]);
+    await pool.query('DELETE FROM events WHERE title = $1', [`Test Event ${marker}`]);
+    await pool.query('DELETE FROM student_invites WHERE email = $1', [`student-${marker}@example.test`]);
+    await pool.query('DELETE FROM users WHERE email IN ($1, $2)', [`admin-${marker}@example.test`, `student-${marker}@example.test`]);
+    await new Promise(resolve => server.close(resolve));
+    await pool.end();
+  }
+});
+
+```
+
+## backend/test/ticketToken.test.js
+
+```js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { hashTicketToken, tokenForTicket } from '../src/config/ticketToken.js';
+
+test('ticket token is stable, versioned, and its stored hash is not the QR value', () => {
+  process.env.JWT_SECRET = 'test-only-secret-with-at-least-thirty-two-characters';
+  const token = tokenForTicket(42, 1);
+  assert.match(token, /^42\.1\.[0-9a-f]{64}$/);
+  assert.equal(token, tokenForTicket(42, 1));
+  assert.notEqual(token, tokenForTicket(42, 2));
+  assert.notEqual(token, hashTicketToken(token));
+  assert.match(hashTicketToken(token), /^[0-9a-f]{64}$/);
+});
+
 ```
 
 ## backend/vercel.json
@@ -615,6 +945,7 @@ export default router;
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "express"
 }
+
 ```
 
 ## frontend/.env.example
@@ -622,6 +953,7 @@ export default router;
 ```text
 VITE_API_URL=http://localhost:3000/api
 # Production: https://your-backend-project.vercel.app/api
+
 ```
 
 ## frontend/index.html
@@ -639,6 +971,7 @@ VITE_API_URL=http://localhost:3000/api
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
+
 ```
 
 ## frontend/package.json
@@ -669,12 +1002,14 @@ VITE_API_URL=http://localhost:3000/api
     "vite": "^6.0.5"
   }
 }
+
 ```
 
 ## frontend/postcss.config.js
 
 ```js
 export default { plugins: { tailwindcss: {}, autoprefixer: {} } };
+
 ```
 
 ## frontend/src/App.jsx
@@ -691,6 +1026,7 @@ import Profile from './pages/Profile.jsx';
 import Settings from './pages/Settings.jsx';
 import AdminDashboard from './pages/AdminDashboard.jsx';
 import Help from './pages/Help.jsx';
+import Privacy from './pages/Privacy.jsx';
 
 export default function App() {
   return (
@@ -706,11 +1042,13 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/help" element={<Help />} />
+        <Route path="/privacy" element={<Privacy />} />
         <Route path="*" element={<main><h1>Page not found</h1></main>} />
       </Routes>
     </BrowserRouter>
   );
 }
+
 ```
 
 ## frontend/src/components/BookingConfirmation.jsx
@@ -727,6 +1065,7 @@ export default function BookingConfirmation({ event, seats, onClose }) {
     <p className="muted">Your tickets are available in My Tickets.</p><Link className="primary-button" to="/tickets">View My Tickets</Link>
   </section></div>;
 }
+
 ```
 
 ## frontend/src/components/BrandMark.jsx
@@ -737,6 +1076,7 @@ export default function BrandMark({ small = false }) {
     <span className="brand-mark-inner"><span className="brand-mark-red" /><span className="brand-mark-blue" /><strong>CS</strong></span>
   </span>;
 }
+
 ```
 
 ## frontend/src/components/Icon.jsx
@@ -766,6 +1106,7 @@ const paths = {
 export default function Icon({ name, size = 24, className = '' }) {
   return <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.ticket}</svg>;
 }
+
 ```
 
 ## frontend/src/components/Navbar.jsx
@@ -808,6 +1149,7 @@ export default function Navbar() {
     </nav>}
   </>;
 }
+
 ```
 
 ## frontend/src/components/StadiumIllustration.jsx
@@ -831,6 +1173,7 @@ export default function StadiumIllustration() {
     </g>
   </svg>;
 }
+
 ```
 
 ## frontend/src/components/TicketQRModal.jsx
@@ -841,9 +1184,10 @@ export default function TicketQRModal({ ticket, onClose }) {
   return <div className="modal-backdrop" onMouseDown={onClose}><section className="modal qr-modal" role="dialog" aria-modal="true" aria-labelledby="qr-title" onMouseDown={e => e.stopPropagation()}>
     <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
     <p className="eyebrow">YOUR ENTRY PASS</p><h2 id="qr-title">{ticket.title}</h2><p>{new Date(ticket.starts_at).toLocaleDateString(undefined, { dateStyle: 'medium' })} · {ticket.venue}</p><p className="qr-seat">Section {ticket.section} · Row {ticket.row_number} · Seat {ticket.seat_number}</p>
-    <div className="qr-code-frame"><QRCodeSVG value={ticket.qr_code_hash} size={220} level="M" marginSize={2} title="Ticket QR code" /></div><p className="muted">Scan this code at the gate</p>
+    <div className="qr-code-frame"><QRCodeSVG value={ticket.qrCode} size={220} level="M" marginSize={2} title="Ticket QR code" /></div><p className="muted">{ticket.redeemed_at ? 'Already used at the gate' : 'Scan this code at the gate'}</p>
   </section></div>;
 }
+
 ```
 
 ## frontend/src/main.jsx
@@ -857,6 +1201,7 @@ import './styles.css';
 createRoot(document.getElementById('root')).render(
   <React.StrictMode><App /></React.StrictMode>,
 );
+
 ```
 
 ## frontend/src/pages/AdminDashboard.jsx
@@ -865,29 +1210,82 @@ createRoot(document.getElementById('root')).render(
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import BrandMark from '../components/BrandMark.jsx';
-import Icon from '../components/Icon.jsx';
-import { fetchAdminStats } from '../services/api.js';
+import { addAdminSeats, createAdminEvent, createAdminInvite, fetchAdminBookings, fetchAdminStats, fetchEvents, fetchUnverifiedStudents, redeemAdminTicket, verifyAdminStudent } from '../services/api.js';
+
+const errorText = error => error.response?.data?.error || 'The request failed. Please try again.';
+const input = 'w-full rounded-xl border border-slate-300 px-3 py-2';
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const user = JSON.parse(sessionStorage.getItem('user') || 'null');
   const [stats, setStats] = useState(null);
+  const [bookings, setBookings] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [unverified, setUnverified] = useState([]);
+  const [panel, setPanel] = useState('event');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function refresh() {
+    const [summary, bookingRows, eventRows, students] = await Promise.all([fetchAdminStats(), fetchAdminBookings(), fetchEvents(), fetchUnverifiedStudents()]);
+    setStats(summary); setBookings(bookingRows); setEvents(eventRows); setUnverified(students);
+  }
   useEffect(() => {
     if (user?.role !== 'admin') return;
-    let active = true;
-    fetchAdminStats().then(result => { if (active) setStats(result); }).catch(err => { if (active) setError(err.response?.data?.error || 'Statistics are unavailable.'); });
-    return () => { active = false; };
+    let mounted = true;
+    Promise.all([fetchAdminStats(), fetchAdminBookings(), fetchEvents(), fetchUnverifiedStudents()]).then(([summary, bookingRows, eventRows, students]) => {
+      if (mounted) { setStats(summary); setBookings(bookingRows); setEvents(eventRows); setUnverified(students); }
+    }).catch(err => { if (mounted) setError(errorText(err)); });
+    return () => { mounted = false; };
   }, [user?.role]);
+
+  async function submit(event, operation) {
+    event.preventDefault(); setBusy(true); setError(''); setNotice('');
+    const form = event.currentTarget;
+    try {
+      const result = await operation(Object.fromEntries(new FormData(form)));
+      form.reset();
+      if (result?.code) setInviteCode(result.code);
+      setNotice(result?.message || 'Saved successfully.');
+      await refresh();
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  }
   if (user?.role !== 'admin' || !sessionStorage.getItem('token')) return <main className="page-shell"><div className="empty-panel"><h1>Admin Dashboard</h1><p>Admin access is required.</p><Link className="primary-button" to="/login">Log in</Link></div></main>;
-  function logout() { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); navigate('/login'); }
-  return <main className="page-shell admin-page"><div className="admin-heading"><BrandMark small /><div><p className="eyebrow">CAMPUS STADIUM</p><h1>Admin Dashboard</h1></div></div>
-    <section><h2 className="section-title">Summary</h2><div className="admin-stats">{[['Total Events', stats?.totalEvents ?? '—', 'calendar'], ['Total Bookings', stats?.totalBookings ?? '—', 'ticket'], ['Active Users', stats?.activeUsers ?? '—', 'user']].map(([label, value, icon]) => <div className="admin-stat" key={label}><Icon name={icon} size={29} /><span>{label}</span><strong>{value}</strong></div>)}</div><p className="field-hint">Active users booked in the last 30 days.</p>{error && <p role="status" className="error-banner">{error}</p>}</section>
-    <section><h2 className="section-title">Manage</h2><div className="admin-management">{[['Add New Event', 'plus'], ['View / Manage Bookings', 'ticket'], ['Manage Seats & Layouts', 'settings']].map(([label, icon]) => <button key={label} disabled title="Management API is not available yet"><Icon name={icon} size={20} />{label}</button>)}<p>Management tools will be available when their API endpoints are added.</p></div></section>
-    <section><h2 className="section-title">Analytics</h2><div className="admin-analytics"><div><Icon name="calendar" size={28} /><h3>Monthly Bookings</h3><p>Booking reports are not available yet.</p></div><div><Icon name="sport" size={28} /><h3>Top Selling Categories</h3><p>Event categories are not yet in the database.</p></div></div></section>
-    <button className="admin-logout" onClick={logout}>Log Out</button>
+
+  return <main className="page-shell admin-page">
+    <div className="admin-heading"><BrandMark small /><div><p className="eyebrow">CAMPUS STADIUM</p><h1>Admin Dashboard</h1></div></div>
+    <section><h2 className="section-title">Summary</h2><div className="admin-stats">{[['Total Events', stats?.totalEvents], ['Total Bookings', stats?.totalBookings], ['Active Users', stats?.activeUsers]].map(([label, value]) => <div className="admin-stat" key={label}><span>{label}</span><strong>{value ?? '—'}</strong></div>)}</div><p className="field-hint">Active users booked in the last 30 days.</p></section>
+    <section className="mt-10"><h2 className="section-title">Manage</h2><div className="flex flex-wrap gap-3 mb-5">{[['event', 'Add Event'], ['bookings', 'Bookings'], ['seats', 'Seats & Layout'], ['invites', 'Student Invites'], ['students', 'Verify Students'], ['gate', 'Gate Check-in']].map(([key, label]) => <button type="button" key={key} className={panel === key ? 'primary-button' : 'outline-button'} onClick={() => { setPanel(key); setError(''); setNotice(''); }}>{label}</button>)}</div>
+      {error && <p role="alert" className="error-banner">{error}</p>}{notice && <p role="status" className="success-banner">{notice}</p>}
+      <div className="section-card p-5 md:p-7">
+        {panel === 'event' && <form className="grid gap-4 md:grid-cols-2" onSubmit={event => submit(event, async values => { const created = await createAdminEvent({ ...values, startsAt: new Date(values.startsAt).toISOString(), endsAt: new Date(values.endsAt).toISOString(), rowsPerSection: Number(values.rowsPerSection), seatsPerRow: Number(values.seatsPerRow) }); return { message: `Created ${created.event.title} with ${created.seatCount} seats.` }; })}>
+          <label>Event title<input className={input} name="title" required maxLength="200" /></label><label>Venue<input className={input} name="venue" required maxLength="200" /></label>
+          <label>Starts at<input className={input} name="startsAt" type="datetime-local" required /></label><label>Ends at<input className={input} name="endsAt" type="datetime-local" required /></label>
+          <label>Category<select className={input} name="category">{['sports', 'music', 'arts', 'academic', 'other'].map(value => <option key={value}>{value}</option>)}</select></label>
+          <label>Rows per section<input className={input} name="rowsPerSection" type="number" min="1" max="50" defaultValue="4" required /></label>
+          <label>Seats per row<input className={input} name="seatsPerRow" type="number" min="1" max="100" defaultValue="8" required /></label>
+          <label className="md:col-span-2">Description<textarea className={input} name="description" maxLength="2000" rows="3" /></label>
+          <button className="primary-button md:col-span-2" disabled={busy}>Create event with sections A–D</button>
+        </form>}
+        {panel === 'bookings' && <div className="overflow-x-auto"><table className="w-full text-left"><thead><tr><th className="p-2">Booking</th><th className="p-2">Student</th><th className="p-2">Event</th><th className="p-2">Seats</th><th className="p-2">Status</th></tr></thead><tbody>{bookings.map(booking => <tr key={booking.id} className="border-t"><td className="p-2">#{booking.id}</td><td className="p-2">{booking.student_name}<br /><small>{booking.university_id || booking.email}</small></td><td className="p-2">{booking.event_title}</td><td className="p-2">{booking.seat_count}</td><td className="p-2">{booking.status}</td></tr>)}</tbody></table>{!bookings.length && <p className="muted">No bookings yet.</p>}<p className="field-hint mt-3">Showing the 100 newest bookings.</p></div>}
+        {panel === 'seats' && <form className="grid gap-4 md:grid-cols-2" onSubmit={event => submit(event, async values => { const result = await addAdminSeats({ eventId: values.eventId, section: values.section, rowNumber: Number(values.rowNumber), fromSeat: Number(values.fromSeat), toSeat: Number(values.toSeat) }); return { message: `Added ${result.seatsAdded} seats.` }; })}>
+          <label>Event<select className={input} name="eventId" required>{events.map(event => <option key={event.id} value={event.id}>{event.title}</option>)}</select></label><label>Section<select className={input} name="section">{['A', 'B', 'C', 'D'].map(code => <option key={code}>{code}</option>)}</select></label>
+          <label>Row number<input className={input} name="rowNumber" type="number" min="1" max="100" required /></label><label>First seat<input className={input} name="fromSeat" type="number" min="1" max="200" required /></label><label>Last seat<input className={input} name="toSeat" type="number" min="1" max="200" required /></label>
+          <button className="primary-button md:col-span-2" disabled={busy || !events.length}>Add available seats</button><p className="field-hint md:col-span-2">Existing or booked seats are never overwritten.</p>
+        </form>}
+        {panel === 'invites' && <><form className="grid gap-4 md:grid-cols-2" onSubmit={event => submit(event, async values => { setInviteCode(''); return createAdminInvite(values); })}><label>Approved student email<input className={input} name="email" type="email" required /></label><label>University ID<input className={input} name="universityId" required maxLength="50" /></label><button className="primary-button md:col-span-2" disabled={busy}>Create one-time invitation</button></form>{inviteCode && <div className="success-banner break-all"><strong>Share privately with the approved student. Expires in 7 days; shown only now:</strong><br /><code>{inviteCode}</code></div>}</>}
+        {panel === 'students' && <div className="grid gap-4">{unverified.length ? unverified.map(student => <form key={student.id} className="grid gap-3 md:grid-cols-[1fr_1fr_auto] items-end border-b pb-4" onSubmit={event => submit(event, async values => { await verifyAdminStudent(student.id, values.universityId); return { message: `Verified ${student.name}.` }; })}><div><strong>{student.name}</strong><p className="muted">{student.email}</p></div><label>Verified University ID<input className={input} name="universityId" defaultValue={student.university_id || ''} required maxLength="50" /></label><button className="primary-button" disabled={busy}>Approve</button></form>) : <p className="muted">No students are awaiting verification.</p>}<p className="field-hint">Confirm identity against the official campus roster before approving an existing account.</p></div>}
+        {panel === 'gate' && <form className="grid gap-4" onSubmit={event => submit(event, async values => { const ticket = await redeemAdminTicket(values.token.trim()); return { message: `Ticket #${ticket.ticket_id} admitted for ${ticket.event_title}.` }; })}><p className="muted">Scan with a keyboard-style QR reader or paste the token. Entry opens two hours before the event. Repeat scans are rejected.</p><label>Ticket QR token<input className={input} name="token" autoComplete="off" required /></label><button className="primary-button" disabled={busy}>Verify and admit</button></form>}
+      </div>
+    </section>
+    <section className="mt-10"><h2 className="section-title">Analytics</h2><div className="admin-analytics"><div><h3>Monthly Bookings</h3>{stats?.monthlyBookings?.length ? stats.monthlyBookings.map(item => <p key={item.month} className="flex justify-between border-b py-2"><span>{item.month}</span><strong>{item.total}</strong></p>) : <p>No bookings yet.</p>}</div><div><h3>Top Selling Event Categories</h3>{stats?.topCategories?.length ? stats.topCategories.map(item => <p key={item.category} className="flex justify-between border-b py-2"><span className="capitalize">{item.category}</span><strong>{item.total}</strong></p>) : <p>No bookings yet.</p>}</div></div></section>
+    <button className="admin-logout" onClick={() => { sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); navigate('/login'); }}>Log Out</button>
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/Events.jsx
@@ -926,6 +1324,7 @@ export default function Events() {
     </article>)}</div>
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/Help.jsx
@@ -950,6 +1349,7 @@ export default function Help() {
     <h2 className="section-title">Contact Support</h2><p className="muted">For account or booking help, contact your campus event administrator through your university's official support channel.</p>
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/Home.jsx
@@ -977,6 +1377,7 @@ export default function Home() {
     <Link className="home-help-link" to="/help"><Icon name="help" size={17} /> Help &amp; Support</Link>
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/Login.jsx
@@ -1021,7 +1422,7 @@ export default function Login() {
         {mode === 'signup' && <label>Full name<input name="name" autoComplete="name" placeholder="Your full name" required maxLength="120" /></label>}
         <label>Email address<input name="email" type="email" autoComplete="email" placeholder="you@university.edu" required maxLength="254" /></label>
         <label>Password<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="Your password" required minLength={mode === 'signup' ? 12 : undefined} /></label>
-        {mode === 'signup' && <p className="field-hint">Use at least 12 characters for your password.</p>}
+        {mode === 'signup' && <><label>Invitation code<input name="invitationCode" autoComplete="off" pattern="[0-9a-f]{64}" title="64-character code from your campus administrator" required /></label><p className="field-hint">Ask the campus administrator for your one-time invitation code. Use at least 12 characters for your password.</p></>}
         {error && <p role="alert" className="error">{error}</p>}
         <button className="primary-button" disabled={busy} type="submit">{busy ? 'Please wait…' : mode === 'login' ? 'Login' : 'Create account'}</button>
       </form>
@@ -1029,6 +1430,7 @@ export default function Login() {
     </section>
   </div><p className="auth-credit">Developed for Software Engineering · Campus Stadium Ticket Booking</p></main>;
 }
+
 ```
 
 ## frontend/src/pages/MyTickets.jsx
@@ -1063,6 +1465,27 @@ export default function MyTickets() {
     {active && <TicketQRModal ticket={active} onClose={() => setActive(null)} />}
   </main>;
 }
+
+```
+
+## frontend/src/pages/Privacy.jsx
+
+```jsx
+import { Link } from 'react-router-dom';
+
+export default function Privacy() {
+  return <main className="page-shell"><div className="page-heading"><p className="eyebrow">DEMO PROJECT</p><h1>Privacy & data use</h1><p>Last updated 14 November 2026</p></div>
+    <div className="section-card p-6 md:p-10 space-y-6 leading-relaxed">
+      <p>This is a software engineering demonstration. Please do not enter real student records, sensitive personal data, or payment information.</p>
+      <section><h2 className="section-title">Data this demo stores</h2><p>Accounts store name, email, university ID, optional phone number, and a one-way password hash. Bookings store event and seat selections. QR ticket hashes and gate check-in times are stored for admission checks. Admins can view booking details and issue student invitations.</p></section>
+      <section><h2 className="section-title">How it is used</h2><p>Data is used to sign in, book seats, show tickets, prevent duplicate entry, and display admin summaries. Notifications and language choices are saved only on this device and do not send messages.</p></section>
+      <section><h2 className="section-title">Storage and access</h2><p>The frontend and API run on Vercel; the database runs on Neon PostgreSQL. Account tokens are kept in this browser tab's session storage. Authorized administrators can access account and booking information. This demo has no automated account deletion or retention schedule.</p></section>
+      <section><h2 className="section-title">Questions and removal requests</h2><p>For this public project, open a <a className="text-blue-700 underline" href="https://github.com/devbyabir/campus-stadium-ticket-booking/issues" target="_blank" rel="noreferrer">GitHub issue</a> without posting personal details. A project administrator must handle data removal manually. This notice is for the demo and must be reviewed by the institution before any real campus launch.</p></section>
+      <Link className="outline-button" to="/settings">Back to settings</Link>
+    </div>
+  </main>;
+}
+
 ```
 
 ## frontend/src/pages/Profile.jsx
@@ -1102,13 +1525,14 @@ export default function Profile() {
 
   if (!sessionStorage.getItem('token') || !user) return <main className="page-shell"><div className="empty-panel"><Icon name="user" size={40} /><h1>My Profile</h1><p>Please log in to view your profile.</p><Link to="/login" className="primary-button">Log in</Link></div></main>;
   const total = tickets?.filter(ticket => ticket.booking_status === 'confirmed').length;
-  const attended = tickets ? new Set(tickets.filter(ticket => ticket.booking_status === 'confirmed' && new Date(ticket.starts_at) < new Date()).map(ticket => ticket.event_id)).size : null;
+  const attended = tickets ? new Set(tickets.filter(ticket => ticket.redeemed_at).map(ticket => ticket.event_id)).size : null;
 
   return <main className="page-shell profile-page"><div className="page-heading centered-heading"><p className="university-label">ZHENGZHOU UNIVERSITY</p><BrandMark /><h1>Campus Stadium Ticket</h1></div>
     <div className="profile-layout"><section className="profile-main"><div className="profile-person"><span className="profile-avatar"><Icon name="user" size={44} /></span><div><p className="eyebrow">MY PROFILE</p><h2>{user.name}</h2><p>{user.role === 'admin' ? 'Administrator' : 'Student account'}</p></div></div>
       {error && <p role="status" className="error-banner">{error}</p>}{message && <p role="status" className="success-banner">{message}</p>}
       <section className="profile-details"><h3>Personal details</h3>{editing ? <form onSubmit={submit} className="profile-edit-form">
-        {[['name', 'Name', user.name], ['universityId', 'University ID', user.universityId || ''], ['email', 'Email', user.email], ['phone', 'Phone', user.phone || '']].map(([key, label, value]) => <label key={key}>{label}<input name={key} defaultValue={value} required={key === 'name' || key === 'email'} type={key === 'email' ? 'email' : 'text'} maxLength={key === 'email' ? 254 : key === 'name' ? 120 : key === 'universityId' ? 50 : 30} /></label>)}
+        {[['name', 'Name', user.name], ['phone', 'Phone', user.phone || '']].map(([key, label, value]) => <label key={key}>{label}<input name={key} defaultValue={value} required={key === 'name'} type="text" maxLength={key === 'name' ? 120 : 30} /></label>)}
+        <p className="field-hint">Email and University ID are verified account identifiers. Contact the administrator to change them.</p>
         <div className="form-actions"><button disabled={saving} className="primary-button">{saving ? 'Saving…' : 'Save changes'}</button><button type="button" onClick={() => setEditing(false)} className="outline-button">Cancel</button></div>
       </form> : <dl>{[['Name', user.name], ['University ID', user.universityId || '—'], ['Email', user.email], ['Phone Number', user.phone || '—'], ['Password', '••••••••']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}</section>
     </section><aside className="profile-side"><section className="activity-section"><h3>My Activity</h3><div className="activity-grid"><div><Icon name="ticket" /><strong>{total ?? '—'}</strong><span>Total Tickets Booked</span></div><div><Icon name="calendar" /><strong>{attended ?? '—'}</strong><span>Events Attended</span></div><div><Icon name="shield" /><strong>—</strong><span>Points Earned</span></div></div><p className="field-hint">Points are not available yet.</p></section>
@@ -1116,6 +1540,7 @@ export default function Profile() {
     </aside></div>
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/SeatMap.jsx
@@ -1182,6 +1607,7 @@ export default function SeatMap() {
     {confirmed && <BookingConfirmation event={data.event} seats={confirmed} onClose={() => setConfirmed(null)} />}
   </main>;
 }
+
 ```
 
 ## frontend/src/pages/Settings.jsx
@@ -1196,7 +1622,6 @@ export default function Settings() {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState(localStorage.getItem('notifications') !== 'off');
   const [language, setLanguage] = useState(localStorage.getItem('language') || 'en');
-  const [privacyOpen, setPrivacyOpen] = useState(false);
   const [passwordError, setPasswordError] = useState('');
   const [passwordMessage, setPasswordMessage] = useState('');
   const [changing, setChanging] = useState(false);
@@ -1207,7 +1632,7 @@ export default function Settings() {
     const values = Object.fromEntries(new FormData(form));
     if (values.newPassword !== values.confirmPassword) { setPasswordError('New passwords do not match.'); return; }
     setChanging(true);
-    try { await changePassword({ currentPassword: values.currentPassword, newPassword: values.newPassword }); form.reset(); setPasswordMessage('Password changed successfully.'); }
+    try { await changePassword({ currentPassword: values.currentPassword, newPassword: values.newPassword }); form.reset(); sessionStorage.removeItem('token'); sessionStorage.removeItem('user'); navigate('/login'); }
     catch (error) { setPasswordError(error.response?.data?.error || 'Unable to change password.'); }
     finally { setChanging(false); }
   }
@@ -1216,8 +1641,7 @@ export default function Settings() {
       <section className="settings-row"><span className="settings-icon"><Icon name="bell" /></span><div><h2>Notifications</h2><p>Save your preference on this device</p></div><label className="switch"><input type="checkbox" checked={notifications} onChange={e => { setNotifications(e.target.checked); localStorage.setItem('notifications', e.target.checked ? 'on' : 'off'); }} /><span aria-hidden="true" /></label></section>
       <section className="settings-row settings-language"><span className="settings-icon"><Icon name="globe" /></span><div><h2>Language</h2><p>Choose your preferred language</p></div><div className="language-switch" role="group" aria-label="Language"><button className={language === 'en' ? 'active' : ''} onClick={() => { setLanguage('en'); localStorage.setItem('language', 'en'); }}>English</button><button className={language === 'zh' ? 'active' : ''} onClick={() => { setLanguage('zh'); localStorage.setItem('language', 'zh'); }}>中文</button></div></section>
       <p className="field-hint settings-hint">Full translation is not available yet.</p>
-      <section className="settings-row settings-row-click"><span className="settings-icon"><Icon name="lock" /></span><div><h2>Privacy Policy</h2></div><button onClick={() => setPrivacyOpen(value => !value)} aria-expanded={privacyOpen} aria-label="Show privacy policy"><Icon name="arrow" /></button></section>
-      {privacyOpen && <div className="settings-expand">The privacy policy has not been published yet. Contact the campus event administrator for data handling details.</div>}
+      <Link className="settings-row settings-row-click" to="/privacy"><span className="settings-icon"><Icon name="lock" /></span><div><h2>Privacy &amp; data use</h2></div><Icon name="arrow" /></Link>
       <Link className="settings-row settings-row-click" to="/help"><span className="settings-icon"><Icon name="help" /></span><div><h2>Help &amp; Support</h2></div><Icon name="arrow" /></Link>
       <button className="settings-row settings-row-click settings-logout" onClick={logout}><span className="settings-icon"><Icon name="logout" /></span><div><h2>Logout</h2></div><Icon name="arrow" /></button>
     </div><section className="password-panel" id="password"><h2>Change Password</h2><p className="muted">Keep your account secure with a new password.</p>
@@ -1227,6 +1651,7 @@ export default function Settings() {
       </form></section></div>
   </main>;
 }
+
 ```
 
 ## frontend/src/services/api.js
@@ -1294,6 +1719,42 @@ export async function fetchAdminStats() {
   const { data } = await api.get('/admin/stats');
   return data.stats;
 }
+
+export async function createAdminInvite(details) {
+  const { data } = await api.post('/admin/invites', details);
+  return data.invite;
+}
+
+export async function createAdminEvent(details) {
+  const { data } = await api.post('/admin/events', details);
+  return data;
+}
+
+export async function fetchAdminBookings() {
+  const { data } = await api.get('/admin/bookings');
+  return data.bookings;
+}
+
+export async function addAdminSeats(details) {
+  const { data } = await api.post('/admin/seats', details);
+  return data;
+}
+
+export async function redeemAdminTicket(token) {
+  const { data } = await api.post('/admin/tickets/redeem', { token });
+  return data.ticket;
+}
+
+export async function fetchUnverifiedStudents() {
+  const { data } = await api.get('/admin/students/unverified');
+  return data.students;
+}
+
+export async function verifyAdminStudent(id, universityId) {
+  const { data } = await api.put(`/admin/students/${encodeURIComponent(id)}/verify`, { universityId });
+  return data.student;
+}
+
 ```
 
 ## frontend/src/styles.css
@@ -1335,12 +1796,14 @@ export async function fetchAdminStats() {
 @media(max-width:760px){.page-shell{width:min(100% - 32px,620px);padding:36px 0 116px}.site-header{height:65px}.site-header-inner{width:min(100% - 32px,620px)}.site-brand strong{font-size:.92rem}.site-brand small{font-size:.5rem}.desktop-nav{display:none}.header-account{margin-left:auto;padding:7px 13px;font-size:.85rem}.bottom-nav{position:fixed;bottom:0;left:0;right:0;height:calc(69px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:#1d3658;display:flex;justify-content:space-around;align-items:center;z-index:10;box-shadow:0 -5px 18px #1b31502b}.bottom-nav a{min-width:64px;color:#cbd7e2;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:.66rem;font-weight:800}.bottom-nav a.active{color:#51a7ee}.home-screen{display:block;min-height:calc(100vh - 134px);padding-top:35px;text-align:center}.home-identity{background:transparent;box-shadow:none;padding:0}.home-identity .brand-mark{margin:17px auto 27px}.home-identity h1{font-size:1.65rem;margin-bottom:27px}.home-welcome{font-size:1.08rem;margin-bottom:30px}.home-stadium{display:none}.home-action-grid{gap:15px}.home-action{min-height:142px;font-size:.95rem;border-radius:20px}.home-action svg{width:32px;height:32px}.home-footnote{font-size:.84rem;margin:22px 0 7px}.auth-layout{max-width:560px;display:flex;flex-direction:column;border-radius:25px}.auth-intro{padding:31px 25px 0;background:transparent}.auth-intro h1{font-size:2.6rem;margin:14px 0 0}.auth-intro>p{display:none}.auth-intro .stadium-illustration{max-width:340px;margin:6px auto 0}.auth-panel{padding:10px 28px 33px}.auth-panel>.eyebrow,.auth-panel>h2,.auth-panel>.muted{display:none}.auth-switch{margin:7px 0 22px}.auth-screen{justify-content:flex-start;padding:20px 18px 15px}.auth-credit{font-size:.68rem}.event-grid,.ticket-list,.seat-layout,.faq-list{grid-template-columns:1fr}.event-card,.ticket-card{padding:17px;gap:14px}.event-card-icon,.ticket-card-icon{width:51px;height:51px;border-radius:14px}.event-card-icon svg{width:31px;height:31px}.event-card h2,.ticket-card h2{font-size:.98rem}.event-date,.ticket-card-copy p{font-size:.82rem}.event-description{font-size:.78rem}.seat-page .page-heading h1{font-size:1.65rem}.stadium-panel{padding:17px}.stadium-map{height:250px}.stadium-ring{border-width:8px;box-shadow:0 0 0 6px #d8e1eb,0 0 0 9px #647d91,inset 0 0 0 6px #dbe4ed}.map-section{width:38px;height:38px;font-size:1.15rem}.seat-legend{gap:10px;font-size:.76rem}.seat-picker{padding:21px}.booking-bar{bottom:76px;padding:15px;align-items:stretch;flex-direction:column}.booking-bar .primary-button{width:100%}.profile-details dl>div{grid-template-columns:120px 1fr}.admin-heading{margin:-36px -16px 28px;border-radius:0;padding:18px}.admin-stats{gap:9px}.admin-stat{padding:17px 7px}.admin-stat strong{font-size:1.2rem}.admin-stat span{font-size:.72rem}.admin-analytics{grid-template-columns:1fr}.settings-language{flex-wrap:wrap}.settings-language .language-switch{margin-left:62px}.page-heading h1{font-size:2.2rem}}
 @media(max-width:430px){.page-shell{width:calc(100% - 28px)}.home-action{min-height:127px}.site-brand small{display:none}.profile-edit-form{grid-template-columns:1fr}.activity-grid>div{padding:12px 5px}.activity-grid span{font-size:.68rem}.profile-details dl>div{display:block}.profile-details dt{margin-bottom:3px}.settings-row{padding:16px;gap:9px}.settings-icon{width:34px;height:34px}.settings-row h2{font-size:.98rem}.settings-row p{font-size:.76rem}.settings-language .language-switch{margin-left:43px}}
 @media(max-width:760px){.booking-bar{position:static}}
+
 ```
 
 ## frontend/tailwind.config.js
 
 ```js
 export default { content: ['./index.html', './src/**/*.{js,jsx}'], theme: { extend: {} }, plugins: [] };
+
 ```
 
 ## frontend/vercel.json
@@ -1350,6 +1813,7 @@ export default { content: ['./index.html', './src/**/*.{js,jsx}'], theme: { exte
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
+
 ```
 
 ## frontend/vite.config.js
@@ -1359,5 +1823,5 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({ plugins: [react()] });
-```
 
+```

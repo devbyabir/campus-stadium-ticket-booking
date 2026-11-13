@@ -37,7 +37,7 @@ export default function Login() {
         {mode === 'signup' && <label>Full name<input name="name" autoComplete="name" placeholder="Your full name" required maxLength="120" /></label>}
         <label>Email address<input name="email" type="email" autoComplete="email" placeholder="you@university.edu" required maxLength="254" /></label>
         <label>Password<input name="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="Your password" required minLength={mode === 'signup' ? 12 : undefined} /></label>
-        {mode === 'signup' && <p className="field-hint">Use at least 12 characters for your password.</p>}
+        {mode === 'signup' && <><label>Invitation code<input name="invitationCode" autoComplete="off" pattern="[0-9a-f]{64}" title="64-character code from your campus administrator" required /></label><p className="field-hint">Ask the campus administrator for your one-time invitation code. Use at least 12 characters for your password.</p></>}
         {error && <p role="alert" className="error">{error}</p>}
         <button className="primary-button" disabled={busy} type="submit">{busy ? 'Please wait…' : mode === 'login' ? 'Login' : 'Create account'}</button>
       </form>

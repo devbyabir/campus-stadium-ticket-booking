@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { createBooking, userTickets } from '../controllers/bookingController.js';
-import { requireAuth } from '../middleware/auth.js';
-import rateLimit from 'express-rate-limit';
+import { requireAuth, requireVerifiedStudent } from '../middleware/auth.js';
+import { dbRateLimit } from '../middleware/dbRateLimit.js';
 import { getProfile, updateProfile, changePassword } from '../controllers/userController.js';
 export const bookingRoutes = Router();
 export const userRoutes = Router();
 const handle = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
-bookingRoutes.post('/', requireAuth, handle(createBooking));
+bookingRoutes.post('/', requireAuth, requireVerifiedStudent, handle(createBooking));
 userRoutes.get('/tickets', requireAuth, handle(userTickets));
 userRoutes.get('/profile', requireAuth, handle(getProfile));
 userRoutes.put('/profile', requireAuth, handle(updateProfile));
-userRoutes.put('/change-password', requireAuth, rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false }), handle(changePassword));
+userRoutes.put('/change-password', requireAuth, dbRateLimit('password', 10), handle(changePassword));

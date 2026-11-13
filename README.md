@@ -18,6 +18,11 @@ Seat records are scoped to events. Booking updates seats and creates QR hashes i
 
 Use two Vercel projects from this GitHub repository and one Neon PostgreSQL project. No Render account or credit card is needed. Free plans have usage limits; review the [Vercel Hobby plan](https://vercel.com/docs/plans/hobby) and [Neon pricing](https://neon.com/pricing).
 
+Live frontend: https://campus-stadium-frontend.vercel.app  
+Live API health check: https://campus-stadium-api.vercel.app/api/health
+
+The deployed database uses the Neon `free_v3` plan. The API and frontend projects are `campus-stadium-api` and `campus-stadium-frontend` in the `dev-by-abir` Vercel team. Production URLs and CORS are configured in those projects. No real events have been added yet, so the events endpoint currently returns an empty list.
+
 1. Create a Neon Free PostgreSQL project. Copy its **pooled** connection URL for the API and **direct** connection URL for migrations. Both URLs should include `sslmode=require`. Keep them secret.
 2. Run migrations once from `backend`: set `MIGRATION_DATABASE_URL` to the direct URL in your local shell, then run `npm run migrate`. The runner records applied files in `schema_migrations`.
 3. In Vercel team `dev-by-abir`, import `devbyabir/campus-stadium-ticket-booking` with **Root Directory** `backend` and **Framework Preset** Express. Set `DATABASE_URL` to the pooled Neon URL, `JWT_SECRET` to a random string of at least 32 characters, and `NODE_ENV=production`. Deploy and check `https://<backend-project>.vercel.app/api/health`.
@@ -25,5 +30,7 @@ Use two Vercel projects from this GitHub repository and one Neon PostgreSQL proj
 5. Set `FRONTEND_ORIGIN=https://<frontend-project>.vercel.app` on the backend Vercel project, without a trailing slash, then redeploy it. Exact preview origins can be added as a comma-separated list.
 
 Vercel environment variables belong in each project's dashboard or CLI, never in Git. `VITE_API_URL` is public in the browser bundle; the database URLs and `JWT_SECRET` belong only to the backend project. The backend exports Express from `src/app.js` for Vercel Functions; `src/local-server.js` is for local development.
+
+To enable deployments on every push, grant the Vercel GitHub App access to this repository in [GitHub Installed Apps](https://github.com/settings/installations), then connect the repository in each project's Vercel **Settings → Git** page. Vercel CLI can deploy either project from the repository root after `vercel link --scope dev-by-abir --project <project-name>`; the configured Root Directory selects `backend` or `frontend`.
 
 For a database migrated manually before `schema_migrations` existed, mark an already applied migration in that table only after verifying its schema changes are present. Do not rerun old SQL blindly.

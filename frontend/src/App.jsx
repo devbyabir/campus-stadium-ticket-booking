@@ -8,6 +8,7 @@ import MyTickets from './pages/MyTickets.jsx';
 import Profile from './pages/Profile.jsx';
 import Settings from './pages/Settings.jsx';
 import AdminDashboard from './pages/AdminDashboard.jsx';
+import Help from './pages/Help.jsx';
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/profile" element={<Profile />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/help" element={<Help />} />
         <Route path="*" element={<main><h1>Page not found</h1></main>} />
       </Routes>
     </BrowserRouter>

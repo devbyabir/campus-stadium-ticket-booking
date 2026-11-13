@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import Icon from '../components/Icon.jsx';
 import { changePassword } from '../services/api.js';
 
 export default function Settings() {
@@ -21,19 +22,19 @@ export default function Settings() {
     catch (error) { setPasswordError(error.response?.data?.error || 'Unable to change password.'); }
     finally { setChanging(false); }
   }
-  return <main className="mx-auto max-w-3xl space-y-6 p-4 sm:p-8"><header><p className="text-sm font-semibold uppercase tracking-widest text-blue-700">Preferences</p><h1 className="text-3xl font-bold">Settings</h1></header>
-    <section className="space-y-6 rounded-2xl bg-white p-5 shadow-sm sm:p-7">
-      <div className="flex items-center justify-between gap-4"><div><h2 className="font-semibold">Notifications</h2><p className="text-sm text-slate-500">Save your notification preference on this device.</p></div><label className="inline-flex items-center gap-2"><input type="checkbox" checked={notifications} onChange={e => { setNotifications(e.target.checked); localStorage.setItem('notifications', e.target.checked ? 'on' : 'off'); }} /><span>{notifications ? 'On' : 'Off'}</span></label></div>
-      <div className="border-t pt-5"><label htmlFor="language" className="block font-semibold">Language</label><select id="language" value={language} onChange={e => { setLanguage(e.target.value); localStorage.setItem('language', e.target.value); }} className="mt-2 w-full rounded-lg border border-slate-300 p-2 sm:w-64"><option value="en">English</option><option value="zh">中文</option></select><p className="mt-2 text-sm text-slate-500">Full translation is not yet available.</p></div>
-      <div className="border-t pt-5"><button onClick={() => setPrivacyOpen(value => !value)} aria-expanded={privacyOpen} className="font-semibold text-blue-700 underline">Privacy policy</button>{privacyOpen && <p className="mt-2 text-sm text-slate-600">The privacy policy has not been published yet. Contact the campus event administrator for data handling details.</p>}</div>
-      <form id="password" onSubmit={submitPassword} className="space-y-3 border-t pt-5"><h2 className="font-semibold">Change password</h2>
-        <label className="block text-sm">Current password<input name="currentPassword" type="password" autoComplete="current-password" required className="mt-1 block w-full rounded-lg border border-slate-300 p-2" /></label>
-        <label className="block text-sm">New password<input name="newPassword" type="password" autoComplete="new-password" minLength="12" required className="mt-1 block w-full rounded-lg border border-slate-300 p-2" /></label>
-        <label className="block text-sm">Confirm new password<input name="confirmPassword" type="password" autoComplete="new-password" minLength="12" required className="mt-1 block w-full rounded-lg border border-slate-300 p-2" /></label>
-        {passwordError && <p role="alert" className="text-red-700">{passwordError}</p>}{passwordMessage && <p role="status" className="text-green-700">{passwordMessage}</p>}
-        <button disabled={changing || !sessionStorage.getItem('token')} className="rounded-lg bg-blue-700 px-5 py-2 text-white disabled:opacity-50">{changing ? 'Updating…' : 'Update password'}</button>
-      </form>
-      <div className="border-t pt-5"><button onClick={logout} className="rounded-lg bg-red-600 px-5 py-2 font-medium text-white">Log out</button></div>
-    </section>
+  return <main className="page-shell settings-page"><div className="page-heading"><p className="eyebrow">YOUR PREFERENCES</p><h1>Settings</h1><p>Make your campus experience your own.</p></div>
+    <div className="settings-layout"><div className="settings-list">
+      <section className="settings-row"><span className="settings-icon"><Icon name="bell" /></span><div><h2>Notifications</h2><p>Save your preference on this device</p></div><label className="switch"><input type="checkbox" checked={notifications} onChange={e => { setNotifications(e.target.checked); localStorage.setItem('notifications', e.target.checked ? 'on' : 'off'); }} /><span aria-hidden="true" /></label></section>
+      <section className="settings-row settings-language"><span className="settings-icon"><Icon name="globe" /></span><div><h2>Language</h2><p>Choose your preferred language</p></div><div className="language-switch" role="group" aria-label="Language"><button className={language === 'en' ? 'active' : ''} onClick={() => { setLanguage('en'); localStorage.setItem('language', 'en'); }}>English</button><button className={language === 'zh' ? 'active' : ''} onClick={() => { setLanguage('zh'); localStorage.setItem('language', 'zh'); }}>中文</button></div></section>
+      <p className="field-hint settings-hint">Full translation is not available yet.</p>
+      <section className="settings-row settings-row-click"><span className="settings-icon"><Icon name="lock" /></span><div><h2>Privacy Policy</h2></div><button onClick={() => setPrivacyOpen(value => !value)} aria-expanded={privacyOpen} aria-label="Show privacy policy"><Icon name="arrow" /></button></section>
+      {privacyOpen && <div className="settings-expand">The privacy policy has not been published yet. Contact the campus event administrator for data handling details.</div>}
+      <Link className="settings-row settings-row-click" to="/help"><span className="settings-icon"><Icon name="help" /></span><div><h2>Help &amp; Support</h2></div><Icon name="arrow" /></Link>
+      <button className="settings-row settings-row-click settings-logout" onClick={logout}><span className="settings-icon"><Icon name="logout" /></span><div><h2>Logout</h2></div><Icon name="arrow" /></button>
+    </div><section className="password-panel" id="password"><h2>Change Password</h2><p className="muted">Keep your account secure with a new password.</p>
+      <form onSubmit={submitPassword}><label>Current password<input name="currentPassword" type="password" autoComplete="current-password" required /></label><label>New password<input name="newPassword" type="password" autoComplete="new-password" minLength="12" required /></label><label>Confirm new password<input name="confirmPassword" type="password" autoComplete="new-password" minLength="12" required /></label>
+        {passwordError && <p role="alert" className="error">{passwordError}</p>}{passwordMessage && <p role="status" className="success-text">{passwordMessage}</p>}
+        <button disabled={changing || !sessionStorage.getItem('token')} className="primary-button">{changing ? 'Updating…' : 'Update Password'}</button>
+      </form></section></div>
   </main>;
 }

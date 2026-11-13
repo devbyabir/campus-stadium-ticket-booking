@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import BrandMark from '../components/BrandMark.jsx';
+import Icon from '../components/Icon.jsx';
 import { fetchMyTickets, fetchProfile, saveProfile } from '../services/api.js';
 
 export default function Profile() {
@@ -16,6 +18,7 @@ export default function Profile() {
     fetchMyTickets().then(rows => { if (active) setTickets(rows); }).catch(() => { if (active) setError('Ticket statistics are unavailable.'); });
     return () => { active = false; };
   }, []);
+
   async function submit(event) {
     event.preventDefault(); setSaving(true); setError(''); setMessage('');
     const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -26,20 +29,20 @@ export default function Profile() {
     } catch (requestError) { setError(requestError.response?.data?.error || 'Unable to update profile.'); }
     finally { setSaving(false); }
   }
-  if (!sessionStorage.getItem('token') || !user) return <main className="mx-auto max-w-5xl p-6"><h1 className="text-3xl font-bold">Profile</h1><p className="mt-4">Please <Link to="/login" className="text-blue-700 underline">log in</Link> to view your profile.</p></main>;
+
+  if (!sessionStorage.getItem('token') || !user) return <main className="page-shell"><div className="empty-panel"><Icon name="user" size={40} /><h1>My Profile</h1><p>Please log in to view your profile.</p><Link to="/login" className="primary-button">Log in</Link></div></main>;
   const total = tickets?.filter(ticket => ticket.booking_status === 'confirmed').length;
   const attended = tickets ? new Set(tickets.filter(ticket => ticket.booking_status === 'confirmed' && new Date(ticket.starts_at) < new Date()).map(ticket => ticket.event_id)).size : null;
-  return <main className="mx-auto max-w-5xl space-y-6 p-4 sm:p-8">
-    <header><p className="text-sm font-semibold uppercase tracking-widest text-blue-700">Account</p><h1 className="text-3xl font-bold">My profile</h1></header>
-    <div className="grid gap-4 sm:grid-cols-3">{[['Total Tickets Booked', total ?? '—'], ['Events Attended', attended ?? '—'], ['Points Earned', '—']].map(([label, value]) => <div className="rounded-2xl bg-white p-5 shadow-sm" key={label}><p className="text-sm text-slate-500">{label}</p><p className="mt-2 text-3xl font-bold">{value}</p></div>)}</div>
-    {error && <p role="status" className="text-amber-700">{error}</p>}
-    {message && <p role="status" className="text-green-700">{message}</p>}
-    <section className="rounded-2xl bg-white p-5 shadow-sm sm:p-7"><h2 className="text-xl font-semibold">Personal details</h2>
-      {editing ? <form onSubmit={submit} className="mt-5 grid gap-4 sm:grid-cols-2">
-        {[['name', 'Name', user.name], ['universityId', 'University ID', user.universityId || ''], ['email', 'Email', user.email], ['phone', 'Phone', user.phone || '']].map(([key, label, value]) => <label className="block text-sm font-medium" key={key}>{label}<input className="mt-1 block w-full rounded-lg border border-slate-300 p-2" name={key} defaultValue={value} required={key === 'name' || key === 'email'} type={key === 'email' ? 'email' : 'text'} maxLength={key === 'email' ? 254 : key === 'name' ? 120 : key === 'universityId' ? 50 : 30} /></label>)}
-        <div className="flex gap-3 sm:col-span-2"><button disabled={saving} className="rounded-lg bg-blue-700 px-4 py-2 text-white">{saving ? 'Saving…' : 'Save changes'}</button><button type="button" onClick={() => setEditing(false)} className="rounded-lg border px-4 py-2">Cancel</button></div>
-      </form> : <dl className="mt-5 grid gap-5 sm:grid-cols-2">{[['Name', user.name], ['University ID', user.universityId || '—'], ['Email', user.email], ['Phone', user.phone || '—'], ['Password', '••••••••']].map(([label, value]) => <div key={label}><dt className="text-sm text-slate-500">{label}</dt><dd className="mt-1 font-medium break-all">{value}</dd></div>)}</dl>}
-      {!editing && <div className="mt-6 flex flex-wrap gap-3"><button onClick={() => { setMessage(''); setEditing(true); }} className="rounded-lg bg-blue-700 px-4 py-2 text-white">Edit profile</button><Link to="/settings#password" className="rounded-lg border px-4 py-2">Change password</Link></div>}
-    </section>
+
+  return <main className="page-shell profile-page"><div className="page-heading centered-heading"><p className="university-label">ZHENGZHOU UNIVERSITY</p><BrandMark /><h1>Campus Stadium Ticket</h1></div>
+    <div className="profile-layout"><section className="profile-main"><div className="profile-person"><span className="profile-avatar"><Icon name="user" size={44} /></span><div><p className="eyebrow">MY PROFILE</p><h2>{user.name}</h2><p>{user.role === 'admin' ? 'Administrator' : 'Student account'}</p></div></div>
+      {error && <p role="status" className="error-banner">{error}</p>}{message && <p role="status" className="success-banner">{message}</p>}
+      <section className="profile-details"><h3>Personal details</h3>{editing ? <form onSubmit={submit} className="profile-edit-form">
+        {[['name', 'Name', user.name], ['universityId', 'University ID', user.universityId || ''], ['email', 'Email', user.email], ['phone', 'Phone', user.phone || '']].map(([key, label, value]) => <label key={key}>{label}<input name={key} defaultValue={value} required={key === 'name' || key === 'email'} type={key === 'email' ? 'email' : 'text'} maxLength={key === 'email' ? 254 : key === 'name' ? 120 : key === 'universityId' ? 50 : 30} /></label>)}
+        <div className="form-actions"><button disabled={saving} className="primary-button">{saving ? 'Saving…' : 'Save changes'}</button><button type="button" onClick={() => setEditing(false)} className="outline-button">Cancel</button></div>
+      </form> : <dl>{[['Name', user.name], ['University ID', user.universityId || '—'], ['Email', user.email], ['Phone Number', user.phone || '—'], ['Password', '••••••••']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}</section>
+    </section><aside className="profile-side"><section className="activity-section"><h3>My Activity</h3><div className="activity-grid"><div><Icon name="ticket" /><strong>{total ?? '—'}</strong><span>Total Tickets Booked</span></div><div><Icon name="calendar" /><strong>{attended ?? '—'}</strong><span>Events Attended</span></div><div><Icon name="shield" /><strong>—</strong><span>Points Earned</span></div></div><p className="field-hint">Points are not available yet.</p></section>
+      {!editing && <div className="profile-actions"><button onClick={() => { setMessage(''); setEditing(true); }} className="primary-button">Edit Profile</button><Link to="/settings#password" className="primary-button">Change Password</Link></div>}
+    </aside></div>
   </main>;
 }

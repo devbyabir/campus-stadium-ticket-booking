@@ -2,6 +2,8 @@
 
 React/Vite frontend, Express API, and PostgreSQL. Authentication, event listing, seat selection, booking, QR tickets, profile editing, password changes, and admin summary counts are implemented. Admin management and detailed analytics still require backend APIs.
 
+The frontend follows the supplied mobile mockups with a responsive desktop layout. The home, events, seat map, tickets, profile, settings, admin, login, and help views share one visual system.
+
 ## Setup
 
 1. Create a PostgreSQL database. Copy `backend/.env.example` to `backend/.env`; set `DATABASE_URL` and a random `JWT_SECRET` of at least 32 characters.
@@ -22,7 +24,7 @@ Live frontend: https://campus-stadium-frontend.vercel.app
 
 Live API health check: https://campus-stadium-api.vercel.app/api/health
 
-The deployed database uses the Neon `free_v3` plan. The API and frontend projects are `campus-stadium-api` and `campus-stadium-frontend` in the `dev-by-abir` Vercel team. Production URLs and CORS are configured in those projects. No real events have been added yet, so the events endpoint currently returns an empty list.
+The deployed database uses the Neon `free_v3` plan. The API and frontend projects are `campus-stadium-api` and `campus-stadium-frontend` in the `dev-by-abir` Vercel team. Production URLs and CORS are configured in those projects. Migration `003_demo_events.sql` adds clearly labeled demo events and seats for the project presentation; replace them with verified campus events before real ticket sales.
 
 1. Create a Neon Free PostgreSQL project. Copy its **pooled** connection URL for the API and **direct** connection URL for migrations. Both URLs should include `sslmode=require`. Keep them secret.
 2. Run migrations once from `backend`: set `MIGRATION_DATABASE_URL` to the direct URL in your local shell, then run `npm run migrate`. The runner records applied files in `schema_migrations`.

@@ -32,6 +32,6 @@ The deployed database uses the Neon `free_v3` plan. The API and frontend project
 
 Vercel environment variables belong in each project's dashboard or CLI, never in Git. `VITE_API_URL` is public in the browser bundle; the database URLs and `JWT_SECRET` belong only to the backend project. The backend exports Express from `src/app.js` for Vercel Functions; `src/local-server.js` is for local development.
 
-To enable deployments on every push, grant the Vercel GitHub App access to this repository in [GitHub Installed Apps](https://github.com/settings/installations), then connect the repository in each project's Vercel **Settings → Git** page. Vercel CLI can deploy either project from the repository root after `vercel link --scope dev-by-abir --project <project-name>`; the configured Root Directory selects `backend` or `frontend`.
+Both Vercel projects are connected to this GitHub repository, so pushes to `main` deploy automatically. The Vercel GitHub App has access only to this repository. For a manual CLI deployment, run `vercel link --scope dev-by-abir --project <project-name>` from the repository root, then `vercel --prod --scope dev-by-abir`; the configured Root Directory selects `backend` or `frontend`.
 
 For a database migrated manually before `schema_migrations` existed, mark an already applied migration in that table only after verifying its schema changes are present. Do not rerun old SQL blindly.

@@ -1,0 +1,22 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import authRoutes from './routes/authRoutes.js';
+import eventRoutes from './routes/eventRoutes.js';
+import { bookingRoutes, userRoutes } from './routes/bookingRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
+import { errorHandler, notFound } from './middleware/errorHandler.js';
+
+export const app = express();
+app.disable('x-powered-by');
+app.use(helmet());
+app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173' }));
+app.use(express.json({ limit: '10kb' }));
+app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+app.use('/api/auth', authRoutes);
+app.use('/api/events', eventRoutes);
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/admin', adminRoutes);
+app.use(notFound);
+app.use(errorHandler);

@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+:root { font-family: system-ui, sans-serif; color: #17233b; background: #f5f7fb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; padding: 1rem max(1rem, calc((100vw - 1100px)/2)); background: #fff; box-shadow: 0 1px 5px #d5dce8; }
+a { color: #175abb; }
+button { font: inherit; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+main { padding: 1.5rem; }
+.page-shell { max-width: 1100px; margin: auto; }
+.sections, .ticket-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 1rem; margin: 1.5rem 0; }
+.section-card, .ticket-card { background: #fff; border: 1px solid #dce3ee; border-radius: 14px; padding: 1.25rem; box-shadow: 0 3px 12px #1f34520d; }
+.section-card h2, .ticket-card h2 { margin-top: 0; }
+.seat-grid { display: flex; flex-wrap: wrap; gap: .5rem; }
+.seat { min-width: 3.5rem; border: 0; border-radius: 7px; padding: .65rem .4rem; color: #fff; }
+.seat.available, .legend.available { background: #2475dc; }
+.seat.selected, .legend.selected { background: #158561; }
+.seat.booked, .legend.booked { background: #929ba9; }
+.seat:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid #f59e0b; outline-offset: 2px; }
+.seat-legend { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.legend { width: 1rem; height: 1rem; border-radius: 3px; display: inline-block; margin-left: .75rem; }
+.booking-bar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; background: #fff; border: 1px solid #dce3ee; border-radius: 12px; }
+.primary-button, .primary-link { display: inline-block; border: 0; border-radius: 8px; padding: .7rem 1rem; background: #175abb; color: #fff; text-decoration: none; }
+.primary-button:disabled { opacity: .55; }
+.error { color: #ad2424; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 10; background: #111b2baa; display: grid; place-items: center; padding: 1rem; }
+.modal { position: relative; width: min(100%, 480px); max-height: 90vh; overflow: auto; background: #fff; border-radius: 16px; padding: 2rem; box-shadow: 0 20px 60px #0004; }
+.modal-close { position: absolute; top: .7rem; right: .8rem; border: 0; background: transparent; font-size: 1.7rem; }
+.qr-modal { text-align: center; }
+.qr-modal svg { max-width: 100%; height: auto; }
+@media (max-width: 600px) { .booking-bar { flex-direction: column; align-items: stretch; } .primary-button { width: 100%; } }

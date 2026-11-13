@@ -6,9 +6,9 @@ import { fetchEvents } from '../services/api.js';
 
 function eventIcon(title) {
   const value = title.toLowerCase();
+  if (/sport|football|basketball|game/.test(value)) return 'sport';
   if (/music|art|concert|fest/.test(value)) return 'music';
   if (/convocation|graduation|founder/.test(value)) return 'graduation';
-  if (/sport|football|basketball|game/.test(value)) return 'sport';
   return 'calendar';
 }
 

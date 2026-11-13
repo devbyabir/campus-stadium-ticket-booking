@@ -20,14 +20,17 @@ Reviewed on 2026-11-14. This file records what was found, what changed, and what
 
 Database migrations `004`, `005`, and `006` were applied successfully to Neon before code deployment. No production test records were created during this audit.
 
-## Outstanding release checks
+## Release verification
 
-- Confirm GitHub Actions passes the integration test and frontend build after push; fix any failures.
-- Confirm both Vercel projects deploy the same commit and `/api/ready`, `/api/events`, and `/privacy` respond correctly. Check auth, admin, booking, and gate workflows with disposable accounts once an authorized admin is available.
+- Commit `ed7160c` was pushed to GitHub `main`. [GitHub Actions run 43491031793](https://github.com/devbyabir/campus-stadium-ticket-booking/actions/runs/43491031793) completed successfully: PostgreSQL migrations, integration tests, and frontend build passed.
+- Both Vercel production deployments reported Ready. Read-only live checks returned HTTP 200 for frontend `/`, `/privacy`, `/admin` and API `/api/health`, `/api/ready`, `/api/events`; unauthenticated `/api/admin/stats` returned HTTP 401 as expected.
+- The full live auth → admin → booking → gate flow remains untested because there is no production admin account. CI tested that flow against disposable PostgreSQL.
+
+## Outstanding decisions
 - Provision the first production administrator through a controlled, approved process. A read-only check found **zero admins** before release. Automatic provisioning was rejected by approval review because it would create a privileged persistent account and could leave credentials unmanaged. Do not silently promote an existing account.
 - Review the current unverified legacy student account against a real campus roster before approving it. Do not assume existing public-signup records are genuine students.
 - For real campus deployment, obtain an official identity source or institutional process, publish an approved privacy/retention policy, designate support and backup owners, and check that the chosen hosting plan permits the intended use. Vercel Hobby is for personal/non-commercial use: https://vercel.com/docs/plans/hobby.
 
 ## Decision
 
-The code can be presented as a demo after a green CI run and live smoke checks. **Do not claim full production closure** until an authorized admin is provisioned, end-to-end checks pass, and the institution accepts the identity, privacy, and operating model. No audit or automated test proves that all security flaws have been found.
+The code can be presented as a demo: CI and read-only live checks passed. **Do not claim full production closure** until an authorized admin is provisioned, live end-to-end checks pass, and the institution accepts the identity, privacy, and operating model. No audit or automated test proves that all security flaws have been found.

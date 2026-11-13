@@ -1,13 +1,12 @@
 # Campus Stadium Ticket Booking
 
-Node.js/Express API with PostgreSQL and a React/Vite frontend. Authentication, event listing, seat selection, booking, QR tickets, profile editing, password changes, and admin summary counts are implemented. Admin management and detailed analytics still require backend APIs.
+React/Vite frontend, Express API, and PostgreSQL. Authentication, event listing, seat selection, booking, QR tickets, profile editing, password changes, and admin summary counts are implemented. Admin management and detailed analytics still require backend APIs.
 
 ## Setup
 
-1. Create a PostgreSQL database named `campus_stadium`. In `backend`, run `npm run migrate` to apply tracked migrations in order. For a database where `001_initial.sql` and `002_profile.sql` were already run manually, add those filenames to `schema_migrations` before running the command; do not apply them twice.
-2. Copy `backend/.env.example` to `backend/.env`. Set `DATABASE_URL` and replace `JWT_SECRET` with a random secret of at least 32 characters.
-3. In `backend`, run `npm install` then `npm run dev`.
-4. In `frontend`, run `npm install` then `npm run dev`. Copy `frontend/.env.example` to `.env` if the API is not on the default URL.
+1. Create a PostgreSQL database. Copy `backend/.env.example` to `backend/.env`; set `DATABASE_URL` and a random `JWT_SECRET` of at least 32 characters.
+2. In `backend`, run `npm ci`, `npm run migrate`, then `npm run dev`.
+3. Copy `frontend/.env.example` to `frontend/.env`. In `frontend`, run `npm ci`, then `npm run dev`.
 
 The API also exposes `GET /api/user/profile`, `PUT /api/user/profile`, `PUT /api/user/change-password`, and admin-only `GET /api/admin/stats`. Active users in admin stats are distinct users with a booking created in the last 30 days. Signup accepts `name`, `email`, and `password` (at least 12 characters, at most 72 UTF-8 bytes) and creates a student account. Both auth routes return `{ "user": { ... }, "token": "..." }`. Send the token with `Authorization: Bearer <token>` for protected routes. Admin users must be provisioned by a trusted database administrator.
 
@@ -15,16 +14,16 @@ Seat records are scoped to events. Booking updates seats and creates QR hashes i
 
 ## Deployment
 
-### Render backend and PostgreSQL
+### Vercel Hobby and Neon Free
 
-The root `render.yaml` defines a Node web service and PostgreSQL database. Create a Render Blueprint from the GitHub repository. Set `FRONTEND_ORIGIN` to the final Vercel origin (for example, `https://your-app.vercel.app`, without a trailing slash) when prompted. Render provides `PORT`, links the internal `DATABASE_URL`, and generates `JWT_SECRET`. The service runs tracked migrations on startup, then starts Express. `DATABASE_SSL=disable` is appropriate for Render's private internal database connection; use `require` for external TLS connections or `verify-full` with a trusted certificate. Keep the API and database in the same region.
+Use two Vercel projects from this GitHub repository and one Neon PostgreSQL project. No Render account or credit card is needed. Free plans have usage limits; review the [Vercel Hobby plan](https://vercel.com/docs/plans/hobby) and [Neon pricing](https://neon.com/pricing).
 
-For an existing database previously migrated by hand, create `schema_migrations` and insert `001_initial.sql` and/or `002_profile.sql` only after verifying each schema change already exists. For a fresh Render database, no manual SQL is needed.
+1. Create a Neon Free PostgreSQL project. Copy its **pooled** connection URL for the API and **direct** connection URL for migrations. Both URLs should include `sslmode=require`. Keep them secret.
+2. Run migrations once from `backend`: set `MIGRATION_DATABASE_URL` to the direct URL in your local shell, then run `npm run migrate`. The runner records applied files in `schema_migrations`.
+3. In Vercel team `dev-by-abir`, import `devbyabir/campus-stadium-ticket-booking` with **Root Directory** `backend` and **Framework Preset** Express. Set `DATABASE_URL` to the pooled Neon URL, `JWT_SECRET` to a random string of at least 32 characters, and `NODE_ENV=production`. Deploy and check `https://<backend-project>.vercel.app/api/health`.
+4. Import the same repository as a second Vercel project with **Root Directory** `frontend` and **Framework Preset** Vite. Set `VITE_API_URL=https://<backend-project>.vercel.app/api` for Production. Deploy and note its URL.
+5. Set `FRONTEND_ORIGIN=https://<frontend-project>.vercel.app` on the backend Vercel project, without a trailing slash, then redeploy it. Exact preview origins can be added as a comma-separated list.
 
-### Vercel frontend
+Vercel environment variables belong in each project's dashboard or CLI, never in Git. `VITE_API_URL` is public in the browser bundle; the database URLs and `JWT_SECRET` belong only to the backend project. The backend exports Express from `src/app.js` for Vercel Functions; `src/local-server.js` is for local development.
 
-Import the same GitHub repository as a Vercel project. Set **Root Directory** to `frontend`, **Framework Preset** to Vite, **Build Command** to `npm run build`, and **Output Directory** to `dist`. Set `VITE_API_URL` to `https://your-render-service.onrender.com/api` in Production and Preview environments, then redeploy. `frontend/vercel.json` rewrites deep links to the SPA entry point.
-
-Set Render `FRONTEND_ORIGIN` to the Vercel deployment origin used by browsers. If the Vercel preview and production origins differ, configure an exact allowlist in the backend before using both; the current CORS setting accepts one origin.
-
-Neither `.env` file nor credentials belong in Git. Vite variables are embedded in the client bundle, so `VITE_API_URL` must contain only a public API URL.
+For a database migrated manually before `schema_migrations` existed, mark an already applied migration in that table only after verifying its schema changes are present. Do not rerun old SQL blindly.

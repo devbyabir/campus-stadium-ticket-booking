@@ -2,7 +2,12 @@ import 'dotenv/config';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { pool } from './config/db.js';
+import pg from 'pg';
+
+const { Pool } = pg;
+const migrationUrl = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+if (!migrationUrl) throw new Error('MIGRATION_DATABASE_URL or DATABASE_URL is required');
+const pool = new Pool({ connectionString: migrationUrl, max: 1 });
 
 const migrationsDir = fileURLToPath(new URL('../migrations/', import.meta.url));
 const lockId = 73412019;

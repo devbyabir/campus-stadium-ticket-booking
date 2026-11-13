@@ -2,10 +2,6 @@ import 'dotenv/config';
 import { pool } from './config/db.js';
 import { app } from './app.js';
 
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-  throw new Error('JWT_SECRET must be at least 32 characters');
-}
-
 const port = Number(process.env.PORT || 3000);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('PORT must be a valid TCP port');

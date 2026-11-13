@@ -5,10 +5,12 @@
 ```text
 PORT=3000
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/campus_stadium
-DATABASE_SSL=disable
+# Neon API: use the pooled connection URL ending in ?sslmode=require.
+# For migrations, set MIGRATION_DATABASE_URL to Neon's direct URL ending in ?sslmode=require.
 JWT_SECRET=replace-with-a-random-secret-at-least-32-characters-long
 JWT_EXPIRES_IN=1h
 FRONTEND_ORIGIN=http://localhost:5173
+# Production: https://your-frontend-project.vercel.app
 NODE_ENV=development
 ```
 
@@ -97,10 +99,9 @@ CREATE UNIQUE INDEX users_university_id_unique ON users (university_id) WHERE un
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "start:deploy": "npm run migrate && npm start",
+    "start": "node src/local-server.js",
     "migrate": "node src/migrate.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node --watch src/local-server.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -120,6 +121,7 @@ CREATE UNIQUE INDEX users_university_id_unique ON users (university_id) WHERE un
 
 ```js
 import express from 'express';
+import 'dotenv/config';
 import cors from 'cors';
 import helmet from 'helmet';
 import authRoutes from './routes/authRoutes.js';
@@ -129,9 +131,14 @@ import adminRoutes from './routes/adminRoutes.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 
 export const app = express();
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  throw new Error('JWT_SECRET must be at least 32 characters');
+}
 app.disable('x-powered-by');
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN || 'http://localhost:5173' }));
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
+  .split(',').map(origin => origin.trim()).filter(Boolean);
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json({ limit: '10kb' }));
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/api/auth', authRoutes);
@@ -141,6 +148,8 @@ app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use(notFound);
 app.use(errorHandler);
+
+export default app;
 ```
 
 ## backend/src/config/db.js
@@ -160,7 +169,8 @@ export const pool = new Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
   ssl: process.env.DATABASE_SSL === 'verify-full' ? { rejectUnauthorized: true }
-    : process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false } : false,
+    : process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false }
+      : process.env.DATABASE_SSL === 'disable' ? false : undefined,
 });
 
 pool.on('error', (error) => {
@@ -353,6 +363,36 @@ export async function changePassword(req, res) {
 }
 ```
 
+## backend/src/local-server.js
+
+```js
+import 'dotenv/config';
+import { pool } from './config/db.js';
+import { app } from './app.js';
+
+const port = Number(process.env.PORT || 3000);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error('PORT must be a valid TCP port');
+}
+
+try {
+  await pool.query('SELECT 1');
+  const server = app.listen(port, () => console.log(`API listening on port ${port}`));
+  async function shutdown() {
+    server.close(async () => {
+      await pool.end();
+      process.exit(0);
+    });
+  }
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+} catch (error) {
+  console.error('Database startup failed', error);
+  await pool.end();
+  process.exitCode = 1;
+}
+```
+
 ## backend/src/middleware/auth.js
 
 ```js
@@ -407,7 +447,12 @@ import 'dotenv/config';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { pool } from './config/db.js';
+import pg from 'pg';
+
+const { Pool } = pg;
+const migrationUrl = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+if (!migrationUrl) throw new Error('MIGRATION_DATABASE_URL or DATABASE_URL is required');
+const pool = new Pool({ connectionString: migrationUrl, max: 1 });
 
 const migrationsDir = fileURLToPath(new URL('../migrations/', import.meta.url));
 const lockId = 73412019;
@@ -542,37 +587,12 @@ router.get('/:id/seats', handle(eventSeats));
 export default router;
 ```
 
-## backend/src/server.js
+## backend/vercel.json
 
-```js
-import 'dotenv/config';
-import { pool } from './config/db.js';
-import { app } from './app.js';
-
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
-  throw new Error('JWT_SECRET must be at least 32 characters');
-}
-
-const port = Number(process.env.PORT || 3000);
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error('PORT must be a valid TCP port');
-}
-
-try {
-  await pool.query('SELECT 1');
-  const server = app.listen(port, () => console.log(`API listening on port ${port}`));
-  async function shutdown() {
-    server.close(async () => {
-      await pool.end();
-      process.exit(0);
-    });
-  }
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-} catch (error) {
-  console.error('Database startup failed', error);
-  await pool.end();
-  process.exitCode = 1;
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "express"
 }
 ```
 
@@ -580,7 +600,7 @@ try {
 
 ```text
 VITE_API_URL=http://localhost:3000/api
-# Production: https://your-render-service.onrender.com/api
+# Production: https://your-backend-project.vercel.app/api
 ```
 
 ## frontend/index.html
